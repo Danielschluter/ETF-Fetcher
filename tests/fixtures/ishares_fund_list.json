@@ -1,0 +1,24 @@
+{
+ "239619": {
+  "fundName": "iShares MSCI China ETF",
+  "localExchangeTicker": "MCHI",
+  "productPageUrl": "/us/products/239619/ishares-msci-china-etf",
+  "productView": [
+   "etf"
+  ],
+  "isin": "US46429B6719",
+  "cusip": "46429B671",
+  "portfolioId": 239619
+ },
+ "239726": {
+  "fundName": "iShares Core S&P 500 ETF",
+  "localExchangeTicker": "IVV",
+  "productPageUrl": "/us/products/239726/ishares-core-sp-500-etf",
+  "productView": [
+   "etf"
+  ],
+  "isin": "US4642872000",
+  "cusip": "464287200",
+  "portfolioId": 239726
+ }
+}

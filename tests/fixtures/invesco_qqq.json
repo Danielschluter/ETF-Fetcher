@@ -1,0 +1,7 @@
+{ "cusip": "QQQ", "effectiveDate": "2026-10-10", "effectiveBusinessDate": "2026-10-09", "totalNumberOfHoldings": 106, "holdings": [
+  { "ticker": "NVDA", "issuerName": "NVIDIA Corp", "units": 182116420, "percentageOfTotalNetAssets": 8.250119, "securityTypeName": "Common Stock", "sectorName": "Technology", "cusip": "67066G104", "currency": "USD", "localCurrencyName": "US Dollar", "securityTypeCode": "COM" },
+  { "ticker": "AAPL", "issuerName": "Apple Inc", "units": 110283794, "percentageOfTotalNetAssets": 7.335376, "securityTypeName": "Common Stock", "sectorName": "Technology", "cusip": "037833100", "currency": "USD", "localCurrencyName": "US Dollar", "securityTypeCode": "COM" },
+  { "ticker": "NQZ6", "issuerName": "CME E-Mini NASDAQ 100 Index Future", "units": 1125, "percentageOfTotalNetAssets": 0.138296, "securityTypeName": "Index Future", "sectorName": "Unit/Investment Trust/Other", "cusip": "NQZ6", "currency": "USD", "localCurrencyName": "US Dollar", "securityTypeCode": "IFUT" },
+  { "ticker": "USD", "issuerName": "CASH &amp; EQUIVALENTS", "units": 685208580.96, "percentageOfTotalNetAssets": 0.135384, "securityTypeName": "Currency", "sectorName": null, "cusip": "CASHUSD00", "currency": "USD", "localCurrencyName": null, "securityTypeCode": "CURR" },
+  { "ticker": "USDPDV", "issuerName": "USD Pending Dividends", "units": 0, "percentageOfTotalNetAssets": null, "securityTypeName": "Currency", "sectorName": null, "cusip": null, "currency": "USD", "localCurrencyName": null, "securityTypeCode": "CURR" }
+] }

@@ -1,0 +1,12 @@
+Nasdaq Traded|Symbol|Security Name|Listing Exchange|Market Category|ETF|Round Lot Size|Test Issue|Financial Status|CQS Symbol|NASDAQ Symbol|NextShares
+Y|AAPL|Apple Inc. - Common Stock|Q|Q|N|40|N|N||AAPL|N
+Y|FPE|First Trust Preferred Securities and Income ETF ETF|P| |Y|100|N||FPE|FPE|N
+Y|GLD|SPDR Gold Shares|P| |Y|40|N||GLD|GLD|N
+Y|IVV|iShares Core S&P 500 ETF|P| |Y|40|N||IVV|IVV|N
+Y|MCHI|iShares MSCI China ETF|Q|G|Y|100|N|N||MCHI|N
+Y|QQQ|Invesco QQQ Trust, Series 1|Q|G|Y|40|N|N||QQQ|N
+Y|QYLD|Global X NASDAQ 100 Covered Call ETF|Q|G|Y|100|N|N||QYLD|N
+Y|SPY|State Street SPDR S&P 500 ETF Trust|P| |Y|40|N||SPY|SPY|N
+Y|VOO|Vanguard S&P 500 ETF|P| |Y|40|N||VOO|VOO|N
+Y|ZXZZT|NASDAQ TEST STOCK|Q|G|Y|100|Y|N||ZXZZT|N
+File Creation Time: 1009202621:32|||||
