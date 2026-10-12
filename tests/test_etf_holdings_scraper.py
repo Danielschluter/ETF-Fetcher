@@ -178,7 +178,7 @@ def client_serving(responses, monkeypatch):
 
     def record_pause(limiter, seconds):
         pauses.append(seconds)
-        original_pause(limiter, seconds)
+        return original_pause(limiter, seconds)
 
     monkeypatch.setattr(s.RateLimiter, "pause", record_pause)
     return client, session, pauses
@@ -425,6 +425,16 @@ class FakeHttp:
         return self.fetcher.get(url)
 
 
+class FakeBrowser(FakeHttp):
+    started = closed = False
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+
+
 def test_run_writes_holdings_and_summary(tmp_path):
     responses = {
         s.NASDAQ_SYMBOL_DIRECTORY: fixture("nasdaqtraded_sample.txt"),
@@ -440,7 +450,11 @@ def test_run_writes_holdings_and_summary(tmp_path):
         "--sources", "ishares", "ssga", "invesco", "first_trust",
         "--output-dir", str(tmp_path), "--no-cache", "--workers", "2",
     ])
-    assert s.run(args, http=FakeHttp(responses)) == 0
+    browser = FakeBrowser(responses)
+    assert s.run(args, http=FakeHttp(responses), browser=browser) == 0
+    assert browser.started and browser.closed
+    # Only ETFs whose issuer source failed or is missing reach Zacks.
+    assert sorted(browser.fetcher.requested) == [ZACKS_URL.format(t) for t in ("GLD", "VOO")]
 
     with (tmp_path / "etf_summary.csv").open() as fh:
         summary = {row["ticker"]: row for row in csv.DictReader(fh)}

@@ -10,8 +10,10 @@ plus a catch-all source for every ETF without a dedicated issuer scraper:
   first_trust  First Trust holdings page
   global_x     Global X daily holdings CSV
   zacks        Zacks ETF holdings page: used for all other ETFs, and as the
-               fallback whenever an issuer source fails. Zacks does not say
-               which date its holdings are as of, so as_of_date is left blank.
+               fallback whenever an issuer source fails. Zacks turns away plain
+               HTTP clients, so its pages are loaded in headless Chrome (via
+               Playwright). Zacks does not say which date its holdings are as
+               of, so as_of_date is left blank.
 
 The ETF universe is every security flagged as an ETF in the Nasdaq Trader
 symbol directory, which covers all US exchanges (NYSE, Arca, Nasdaq, Cboe...).
@@ -39,13 +41,14 @@ import io
 import json
 import logging
 import os
+import queue
 import re
 import sys
 import threading
 import time
 import warnings
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence, TypeVar
@@ -131,9 +134,7 @@ class Blocked(NotAvailable):
 
 # Pages that bot-protection services (Imperva, Cloudflare) serve instead of the content.
 _BOT_CHECK = re.compile(
-    r"Pardon Our Interruption|_Incapsula_Resource|<title>\s*Just a moment\.\.\.\s*</title>",
-    re.IGNORECASE,
-)
+    r"Pardon Our Interruption|<title>\s*Just a moment\.\.\.\s*</title>", re.IGNORECASE)
 
 
 def looks_like_bot_check(resp: requests.Response) -> bool:
@@ -158,10 +159,14 @@ class RateLimiter:
         if slot > now:
             time.sleep(slot - now)
 
-    def pause(self, seconds: float) -> None:
-        """Hold every request to this host for a while."""
+    def pause(self, seconds: float) -> bool:
+        """Hold every request for a while. False if they were already held about as long."""
         with self.lock:
-            self.next_slot = max(self.next_slot, time.monotonic() + seconds)
+            until = time.monotonic() + seconds
+            if until <= self.next_slot + 1:
+                return False
+            self.next_slot = until
+            return True
 
 
 class HttpClient:
@@ -216,10 +221,9 @@ class HttpClient:
                 with self.lock:
                     self.blocked_streak[host] = 0
                 return resp.content
-            if pause is not None:
+            if pause is not None and limiter.pause(pause):
                 log.warning("%s answered with a bot check; pausing requests to it for %ds",
                             host, pause)
-                limiter.pause(pause)
         with self.lock:
             self.blocked_streak[host] += 1
             if self.blocked_streak[host] >= self.GIVE_UP_AFTER and host not in self.given_up:
@@ -288,10 +292,149 @@ class DiskCache:
             self._path(url).unlink(missing_ok=True)
 
 
-class Fetcher:
-    """HTTP access with a cache in front of it, so reruns and resumed runs are fast."""
+class SetupError(RuntimeError):
+    """Something the run needs could not be started."""
 
-    def __init__(self, http: HttpClient, cache: DiskCache, refresh: bool = False):
+
+class BrowserPool:
+    """Loads pages in headless Chrome, for websites that turn scripts away but serve browsers.
+
+    Playwright objects can only be used by the thread that created them, so each
+    worker thread runs its own browser and takes URLs from a shared queue.
+    """
+
+    BOT_CHECK_WAIT = 30  # seconds for a bot check to clear itself and reload the page
+    GIVE_UP_AFTER = 5  # pages in a row that never got past the bot check
+
+    def __init__(self, workers: int, rate: float, browser: str = "chrome",
+                 headless: bool = True, timeout: float = 60):
+        self.workers = workers
+        self.browser = browser
+        self.headless = headless
+        self.timeout_ms = timeout * 1000
+        self.limiter = RateLimiter(rate)
+        self.jobs: queue.Queue = queue.Queue()
+        self.threads: list[threading.Thread] = []
+        self.lock = threading.Lock()
+        self.blocked_streak = 0
+        self.given_up = False
+
+    def start(self) -> None:
+        try:
+            import playwright.sync_api  # noqa: F401
+        except ImportError:
+            raise SetupError("Playwright is not installed: pip install playwright") from None
+        for i in range(self.workers):
+            ready = threading.Event()
+            failure: list[Exception] = []
+            thread = threading.Thread(target=self._work, args=(ready, failure),
+                                      name=f"browser-{i}", daemon=True)
+            thread.start()
+            ready.wait()
+            if failure:
+                self.close()
+                raise SetupError(f"could not start the browser ({self.browser}): {failure[0]}")
+            self.threads.append(thread)
+
+    def get(self, url: str) -> bytes:
+        if self.given_up:
+            raise Blocked("skipped: Zacks kept answering with a bot check")
+        future: Future = Future()
+        self.jobs.put((url, future))
+        return future.result()
+
+    def close(self) -> None:
+        while True:  # cancel the pages that haven't started loading
+            try:
+                job = self.jobs.get_nowait()
+            except queue.Empty:
+                break
+            if job is not None:
+                job[1].cancel()
+        for _ in self.threads:
+            self.jobs.put(None)
+        for thread in self.threads:
+            thread.join(timeout=60)
+        self.threads = []
+
+    def _launch_options(self) -> dict:
+        options: dict = {"headless": self.headless,
+                         "args": ["--disable-blink-features=AutomationControlled"]}
+        if self.browser == "chrome":
+            options["channel"] = "chrome"  # the installed Google Chrome
+        elif self.browser != "chromium":  # "chromium" is Playwright's own download
+            options["executable_path"] = self.browser
+        return options
+
+    def _work(self, ready: threading.Event, failure: list[Exception]) -> None:
+        from playwright.sync_api import sync_playwright
+        try:
+            with sync_playwright() as playwright:
+                try:
+                    browser = playwright.chromium.launch(**self._launch_options())
+                    page = browser.new_page()
+                except Exception as exc:
+                    failure.append(exc)
+                    return
+                finally:
+                    ready.set()
+                self._serve(browser, page)
+                browser.close()
+        except Exception as exc:
+            if not ready.is_set():
+                failure.append(exc)
+                ready.set()
+            log.debug("Browser worker stopped", exc_info=True)
+
+    def _serve(self, browser, page) -> None:
+        while (job := self.jobs.get()) is not None:
+            url, future = job
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                if self.given_up:
+                    raise Blocked("skipped: Zacks kept answering with a bot check")
+                if page.is_closed():
+                    page = browser.new_page()
+                future.set_result(self._load(page, url))
+            except Exception as exc:
+                future.set_exception(exc)
+
+    def _load(self, page, url: str) -> bytes:
+        self.limiter.wait()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+        except Exception:
+            if page.url in ("", "about:blank"):
+                raise  # nothing loaded at all
+            # Otherwise the bot check's own reload interrupted it; keep watching the page.
+        deadline = time.monotonic() + self.BOT_CHECK_WAIT
+        while True:
+            try:
+                html = page.content()
+            except Exception:  # the page is reloading
+                html = ""
+            if html and not _BOT_CHECK.search(html):
+                self._record(blocked=False)
+                return html.encode("utf-8")
+            if time.monotonic() > deadline:
+                self._record(blocked=True)
+                raise Blocked("answered with a bot check that did not clear")
+            page.wait_for_timeout(500)
+
+    def _record(self, blocked: bool) -> None:
+        with self.lock:
+            self.blocked_streak = self.blocked_streak + 1 if blocked else 0
+            if self.blocked_streak >= self.GIVE_UP_AFTER and not self.given_up:
+                self.given_up = True
+                log.error("Zacks keeps answering with a bot check, even in a browser; skipping "
+                          "it for the rest of this run. Run again later to fill in the gaps.")
+
+
+class Fetcher:
+    """A cache in front of an HttpClient or BrowserPool, so reruns and resumed runs are fast."""
+
+    def __init__(self, http: HttpClient | BrowserPool, cache: DiskCache, refresh: bool = False):
         self.http = http
         self.cache = cache
         self.refresh = refresh
@@ -783,7 +926,6 @@ ISSUER_SOURCES: dict[str, type[Source]] = {
     "first_trust": FirstTrustSource,
     "global_x": GlobalXSource,
 }
-FALLBACK_SOURCE = ZacksSource
 
 
 # ---------------------------------------------------------------------- Scraper
@@ -853,6 +995,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                         default=list(ISSUER_SOURCES), help="Issuer sources to use")
     parser.add_argument("--no-fallback", action="store_true",
                         help="Skip Zacks: only ETFs covered by an issuer source get holdings")
+    parser.add_argument("--browser", default="chrome",
+                        help='Browser for Zacks pages: "chrome" (your installed Google Chrome), '
+                             '"chromium" (after `playwright install chromium`), or a path')
+    parser.add_argument("--browser-workers", type=int, default=4,
+                        help="Browsers loading Zacks pages in parallel")
+    parser.add_argument("--show-browser", action="store_true",
+                        help="Show the browser windows instead of running them in the background")
     parser.add_argument("--output-dir", type=Path, default=Path("output"))
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache"),
                         help="Downloads are kept here for a few hours so reruns resume quickly")
@@ -867,8 +1016,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
     if args.rate <= 0:
         parser.error("--rate must be positive")
-    if args.workers < 1:
-        parser.error("--workers must be at least 1")
+    if args.workers < 1 or args.browser_workers < 1:
+        parser.error("--workers and --browser-workers must be at least 1")
     if args.tickers:
         args.tickers = [
             t.strip().upper() for arg in args.tickers for t in arg.split(",") if t.strip()]
@@ -895,9 +1044,11 @@ def write_csv(path: Path, columns: list[str], rows: Iterable[dict]) -> None:
         writer.writerows(rows)
 
 
-def run(args: argparse.Namespace, http: HttpClient | None = None) -> int:
+def run(args: argparse.Namespace, http: HttpClient | None = None,
+        browser: BrowserPool | None = None) -> int:
     http = http or HttpClient(args.user_agent, args.rate)
-    fetcher = Fetcher(http, DiskCache(None if args.no_cache else args.cache_dir), args.refresh)
+    cache = DiskCache(None if args.no_cache else args.cache_dir)
+    fetcher = Fetcher(http, cache, args.refresh)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     universe = load_universe(fetcher)
@@ -907,7 +1058,21 @@ def run(args: argparse.Namespace, http: HttpClient | None = None) -> int:
     issuers = [ISSUER_SOURCES[name](fetcher) for name in args.sources]
     for source in issuers:
         source.prepare()
-    scraper = HoldingsScraper(issuers, None if args.no_fallback else FALLBACK_SOURCE(fetcher))
+    fallback = None
+    if not args.no_fallback:
+        # Zacks turns away plain HTTP clients, so its pages are loaded in a browser.
+        browser = browser or BrowserPool(args.browser_workers, args.rate, args.browser,
+                                         headless=not args.show_browser)
+        browser.start()
+        fallback = ZacksSource(Fetcher(browser, cache, args.refresh))
+    try:
+        return scrape_all(args, etfs, HoldingsScraper(issuers, fallback))
+    finally:
+        if browser is not None:
+            browser.close()
+
+
+def scrape_all(args: argparse.Namespace, etfs: list[Etf], scraper: HoldingsScraper) -> int:
     planned = Counter(scraper.sources_for(etf)[0].name if scraper.sources_for(etf) else "none"
                       for etf in etfs)
     log.info("Primary source per ETF: %s",
@@ -966,6 +1131,11 @@ def main(argv: list[str] | None = None) -> int:
         return run(args)
     except requests.RequestException as exc:  # per-ETF failures are handled inside run()
         log.error("Could not download the ETF list: %s", exc)
+        return 1
+    except SetupError as exc:
+        log.error("Zacks fallback unavailable: %s. Install Google Chrome, or run "
+                  "`playwright install chromium` and pass --browser chromium, or pass "
+                  "--no-fallback to use issuer websites only.", exc)
         return 1
 
 

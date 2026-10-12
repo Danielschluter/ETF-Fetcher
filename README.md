@@ -18,7 +18,7 @@
    | `invesco`     | names starting with "Invesco"        | JSON API            | In response     |
    | `first_trust` | names starting with "First Trust" or "FT Vest" | HTML page | On page        |
    | `global_x`    | names starting with "Global X"       | CSV, named by date  | In file name    |
-   | `zacks`       | everything else, and the fallback when an issuer source fails | HTML page | **Not published** |
+   | `zacks`       | everything else, and the fallback when an issuer source fails | Web page, loaded in headless Chrome | **Not published** |
 
    When a source has no file for a fund, errors out, or returns no rows, the
    next source is tried. The summary file records which source was used and why
@@ -27,7 +27,8 @@
 ## Usage
 
 Set up once, in the project folder. A virtual environment keeps the packages
-inside the project, which Homebrew's Python on macOS requires:
+inside the project, which Homebrew's Python on macOS requires. Zacks pages are
+loaded in your installed Google Chrome, running hidden in the background:
 
 ```bash
 python3 -m venv .venv
@@ -47,7 +48,8 @@ python etf_holdings_scraper.py --sources ishares ssga --no-fallback   # issuer d
 
 A full run makes about one request per ETF (two or three for a few Global X
 funds), at most `--rate` requests per second to each website (default 2).
-Zacks serves most ETFs, so expect a full run to take around 30–45 minutes.
+Zacks serves most ETFs, and its pages take a few seconds each in a browser, so
+expect a full run to take roughly an hour.
 Downloads are cached in `.cache/` for six hours, so an interrupted run restarts
 quickly; `--refresh` ignores the cache. Ctrl-C stops the run and still writes
 the summary for the ETFs finished so far.
@@ -57,7 +59,10 @@ the summary for the ETFs finished so far.
 | `--tickers` | all ETFs | Space or comma separated |
 | `--limit N` | | Only the first N ETFs |
 | `--sources` | all issuer sources | Any of `ishares ssga invesco first_trust global_x` |
-| `--no-fallback` | | Don't use Zacks |
+| `--no-fallback` | | Don't use Zacks (no browser needed) |
+| `--browser` | `chrome` | `chrome` (installed Google Chrome), `chromium` (after `playwright install chromium`), or a path to a browser |
+| `--browser-workers` | 4 | Browsers loading Zacks pages in parallel |
+| `--show-browser` | | Show the browser windows, for troubleshooting |
 | `--output-dir` | `output` | |
 | `--cache-dir` / `--no-cache` / `--refresh` | `.cache` | |
 | `--workers` | 8 | Parallel downloads |
@@ -92,12 +97,12 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   was at least about four weeks old. That is still far fresher than SEC N-PORT
   filings (quarter-end, published ~60 days later), but for funds where daily
   data matters, add an issuer source (see below).
-- **Zacks sometimes answers with a bot check** ("Pardon Our Interruption")
-  instead of the page. The script then pauses all Zacks requests for 30, 60,
-  then 120 seconds, retrying after each pause. If Zacks keeps blocking, it is
-  skipped for the rest of the run and those ETFs say so in the summary's
-  `detail` column. Successful downloads stay cached for six hours, so running
-  again later only fetches what's missing.
+- **Zacks blocks plain scripts** with a bot check ("Pardon Our Interruption"),
+  which is why its pages are loaded in a real browser: the check clears itself
+  there. If a page is still on the check after 30 seconds, it is skipped; after
+  five such pages in a row, Zacks is skipped for the rest of the run and those
+  ETFs say so in the summary's `detail` column. Successful downloads stay
+  cached for six hours, so running again later only fetches what's missing.
 - **Zacks weights are rounded to 0.01%**, so funds with thousands of tiny
   positions can add up to well over 100% (AGG: 192%). Short positions such as
   written options also show positive weights there.
@@ -129,6 +134,9 @@ pip install pytest
 pytest
 ```
 
-The tests run offline against sample responses in `tests/fixtures/`, trimmed
+`tests/test_browser_pool.py` also starts a real headless browser (Chrome, or
+the one named in `ETF_TEST_BROWSER`) against a local stand-in for Zacks,
+including a bot check that clears itself; it is skipped if no browser starts.
+The other tests run offline against sample responses in `tests/fixtures/`, trimmed
 from real downloads, except the Global X holdings file: that site blocked the
 tool used to capture the others, so its sample is representative.
