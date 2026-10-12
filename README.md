@@ -123,7 +123,6 @@ pip install pytest
 pytest
 ```
 
-The tests run offline against sample responses in `tests/fixtures/`, most of
-them trimmed from real 2026-10-11 downloads. The iShares and Global X holdings
-files are representative samples: their websites blocked the tool used to
-capture the others.
+The tests run offline against sample responses in `tests/fixtures/`, trimmed
+from real downloads, except the Global X holdings file: that site blocked the
+tool used to capture the others, so its sample is representative.

@@ -510,9 +510,7 @@ class IsharesSource(Source):
         "dcrPath=/templatedata/config/product-screener-v3/data/en/us-ishares/"
         "ishares-product-screener-backend-config&siteEntryPassthrough=true"
     )
-    # 1467271812596 is the id of the holdings download component on every fund page.
-    HOLDINGS = ("https://www.ishares.com{page}/1467271812596.ajax"
-                "?fileType=csv&fileName={ticker}_holdings&dataType=fund")
+    HOLDINGS = "https://www.ishares.com{page}/latest-holdings.csv"
 
     def __init__(self, fetcher: Fetcher):
         super().__init__(fetcher)
@@ -532,7 +530,7 @@ class IsharesSource(Source):
         return etf.ticker in self.pages
 
     def fetch(self, etf: Etf) -> Holdings:
-        url = self.HOLDINGS.format(page=self.pages[etf.ticker], ticker=etf.ticker)
+        url = self.HOLDINGS.format(page=self.pages[etf.ticker])
         holdings, preamble = self.download(url, lambda d: rows_to_holdings(read_csv_rows(d)))
         return Holdings(self.name, url, find_as_of(preamble), holdings)
 

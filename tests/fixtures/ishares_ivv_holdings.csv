@@ -1,16 +1,14 @@
-﻿iShares Core S&P 500 ETF
+iShares Core S&P 500 ETF
 Fund Holdings as of,"Oct 09, 2026"
 Inception Date,"May 15, 2000"
-Shares Outstanding,"1,178,850,000.00"
+Shares Outstanding,"1,146,500,000.00"
 Stock,"-"
 Bond,"-"
 Cash,"-"
 Other,"-"
- 
+
 Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Quantity,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date
-"NVDA","NVIDIA CORP","Information Technology","Equity","75,912,345,678.12","8.34","75,912,345,678.12","419,364,521.00","181.02","United States","NASDAQ","USD","1.00","USD","-"
-"AAPL","APPLE INC","Information Technology","Equity","67,601,234,567.89","7.43","67,601,234,567.89","252,912,334.00","267.29","United States","NASDAQ","USD","1.00","USD","-"
-"ESZ6","S&P500 EMINI DEC 26","Cash and/or Derivatives","Futures","0.00","0.00","1,402,120,500.00","3,722.00","7,534.25","United States","Chicago Mercantile Exchange","USD","1.00","USD","-"
-"USD","USD CASH","Cash and/or Derivatives","Cash","-12,345,678.00","-0.01","-12,345,678.00","-12,345,678.00","100.00","United States","-","USD","1.00","USD","-"
- 
-"The content contained herein is owned or licensed by BlackRock and/or its third-party information providers and is protected by applicable copyrights, trademarks, service marks, and/or other intellectual property rights."
+"NVDA","NVIDIA","Information Technology","Equity","73,792,336,834.24","8.23","73,792,336,834.24","321,843,758.00","229.28","United States","NASDAQ","USD","1.00","USD","-"
+"AAPL","APPLE","Information Technology","Equity","65,339,398,172.16","7.29","65,339,398,172.16","194,092,794.00","336.64","United States","NASDAQ","USD","1.00","USD","-"
+"ETD_USD","ETD USD BALANCE WITH R30382","Cash and/or Derivatives","Cash","11,112,685.86","0.00","11,112,685.86","11,112,686.00","100.00","United States","-","USD","1.00","USD","Jan 01, 2000"
+"ESZ6","S&P500 EMINI DEC 26","Cash and/or Derivatives","Futures","0.00","0.00","2,124,097,437.50","5,405.00","7,859.75","-","Index And Options Market","USD","1.00","USD","-"

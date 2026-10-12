@@ -156,8 +156,7 @@ FPE = s.Etf("FPE", "First Trust Preferred Securities and Income ETF ETF", "NYSE 
 QYLD = s.Etf("QYLD", "Global X NASDAQ 100 Covered Call ETF", "Nasdaq")
 VOO = s.Etf("VOO", "Vanguard S&P 500 ETF", "NYSE Arca")
 
-IVV_URL = ("https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf/1467271812596.ajax"
-           "?fileType=csv&fileName=IVV_holdings&dataType=fund")
+IVV_URL = "https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf/latest-holdings.csv"
 SPY_URL = ("https://www.ssga.com/library-content/products/fund-data/etfs/us/"
            "holdings-daily-us-en-spy.xlsx")
 QQQ_URL = ("https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses/QQQ/holdings/fund"
@@ -185,16 +184,17 @@ def test_ishares_source():
     assert source.handles(IVV) and not source.handles(SPY)
     result = source.fetch(IVV)
     assert result.as_of == "2026-10-09"
-    assert [h["ticker"] for h in result.rows] == ["NVDA", "AAPL", "ESZ6", "USD"]
+    assert [h["ticker"] for h in result.rows] == ["NVDA", "AAPL", "ETD_USD", "ESZ6"]
     nvda = result.rows[0]
-    assert nvda["holding_name"] == "NVIDIA CORP"
-    assert nvda["weight_pct"] == 8.34
-    assert nvda["market_value"] == 75912345678.12
-    assert nvda["shares"] == 419364521.0
+    assert nvda["holding_name"] == "NVIDIA"
+    assert nvda["weight_pct"] == 8.23
+    assert nvda["market_value"] == 73792336834.24
+    assert nvda["shares"] == 321843758.0
+    assert nvda["price"] == 229.28
     assert nvda["sector"] == "Information Technology"
     assert nvda["asset_class"] == "Equity"
     assert nvda["country"] == "United States"
-    assert result.rows[3]["weight_pct"] == -0.01
+    assert result.rows[3]["asset_class"] == "Futures" and result.rows[3]["country"] == ""
 
 
 def test_ishares_without_fund_list_handles_nothing():
