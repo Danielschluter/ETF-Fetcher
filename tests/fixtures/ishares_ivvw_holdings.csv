@@ -1,0 +1,30 @@
+iShares S&P 500 BuyWrite ETF
+Fund Holdings as of,"Oct 09, 2026"
+Inception Date,"Mar 14, 2024"
+Shares Outstanding,"7,720,000.00"
+Stock,"-"
+Bond,"-"
+Cash,"-"
+Other,"-"
+
+Ticker,Name,Type,Sector,Asset Class,Market Value,Weight (%),Notional Value,Quantity,Price,Strike price,Location,Exchange,Currency,FX Rate,Maturity,Market Currency,Accrual Date
+"IVV","ISHARES CORE S&P ETF TRUST","EQUITY","Financials","Equity","355,640,737.97","102.40","355,640,737.97","454,801.00","781.97","-","United States","NYSE Arca","USD","1.00","-","USD","-"
+"XTSLA","BLK CSH FND TREASURY SL AGENCY","FUND","Cash and/or Derivatives","Money Market","530,000.00","0.15","530,000.00","530,000.00","1.00","-","United States","-","USD","1.00","-","USD","-"
+"USD","USD CASH","CASH","Cash and/or Derivatives","Cash","-10,721.16","0.00","-10,721.16","-10,721.00","100.00","-","United States","-","USD","1.00","-","USD","-"
+"SPX","OCT26 SPX C @ 7625.000000","OPTION","Cash and/or Derivatives","Other Derivatives","-8,847,792.03","-2.55","-334,100,467.30","-455.00","194.46","7,625.00","United States","OPQ","USD","1.00","Oct 16, 2026","USD","-"
+
+iShares S&P 500 BuyWrite ETF
+Fund Holdings as of,"Oct 09, 2026"
+Inception Date,"Mar 14, 2024"
+Shares Outstanding,"7,720,000.00"
+Stock,"-"
+Bond,"-"
+Cash,"-"
+Other,"-"
+
+Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,Price,Location,Exchange,Currency,FX Rate,Maturity,Market Currency,Accrual Date,Strike price
+"NVDA","NVIDIA","Information Technology","Equity","29,262,511.12","8.43","29,262,511.12","127,628.00","229.28","United States","NASDAQ","USD","1.00","-","USD","-","-"
+"AAPL","APPLE","Information Technology","Equity","25,910,490.48","7.46","25,910,490.48","76,968.00","336.64","United States","NASDAQ","USD","1.00","-","USD","-","-"
+"MSFT","MICROSOFT","Information Technology","Equity","20,954,103.33","6.03","20,954,103.33","39,161.00","535.07","United States","NASDAQ","USD","1.00","-","USD","-","-"
+"AMZN","AMAZON.COM INC","Consumer Discretionary","Equity","13,584,978.29","3.91","13,584,978.29","51,766.00","262.43","United States","NASDAQ","USD","1.00","-","USD","-","-"
+"GOOGL","ALPHABET CLASS A","Communication","Equity","10,882,962.22","3.13","10,882,962.22","30,947.00","351.66","United States","NASDAQ","USD","1.00","-","USD","-","-"

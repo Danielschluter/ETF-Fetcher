@@ -385,6 +385,75 @@ def test_zacks_parser_without_holdings():
         s.parse_zacks("<html>no data</html>")
 
 
+# --------------------------------------------------------------- value weights
+
+
+def holding(name, market_value, weight_pct):
+    return s.normalize_holding(
+        {"holding_name": name, "market_value": market_value, "weight_pct": weight_pct})
+
+
+def test_value_weights_restore_weights_rounded_to_zero():
+    # 1,000 positions of 0.004% each are published as 0.00%.
+    rows = [holding("A", 500_000.0, 50.0), holding("B", 460_000.0, 46.0)]
+    rows += [holding(f"tiny {i}", 40.0, 0.0) for i in range(1000)]
+    assert s.add_value_weights(rows) == ""
+    assert rows[0]["value_weight_pct"] == 50.0
+    assert rows[2]["value_weight_pct"] == 0.004
+    assert sum(r["value_weight_pct"] for r in rows) == pytest.approx(100)
+
+
+def test_value_weights_with_short_positions_and_futures():
+    as_of, rows = s.parse_first_trust(fixture("first_trust_ftls.html").decode())
+    assert as_of == "2026-10-09" and len(rows) == 518
+    assert s.add_value_weights(rows) == ""
+    assert sum(r["value_weight_pct"] for r in rows if r["value_weight_pct"] != "") == \
+        pytest.approx(100)
+    # Short sales: negative values and weights, each within rounding of the published weight.
+    shorts = [r for r in rows if isinstance(r["market_value"], float) and r["market_value"] < 0]
+    assert len(shorts) == 247
+    assert all(abs(r["value_weight_pct"] - r["weight_pct"]) <= 0.005 for r in shorts)
+    snps = next(r for r in rows if r["ticker"] == "SNPS")
+    assert (snps["shares"], snps["weight_pct"]) == (-11283.0, -0.22)
+    assert snps["sector"] == "Information Technology"
+    # First Trust lists the short S&P 500 futures at their notional amount.
+    future = next(r for r in rows if r["holding_name"].startswith("S&P500 EMINI FUT"))
+    assert (future["market_value"], future["notional_value"]) == ("", -269589425.0)
+    assert future["value_weight_pct"] == ""
+
+
+def test_value_weights_with_written_options():
+    rows, _ = s.rows_to_holdings(s.read_csv_rows(fixture("ishares_ivvw_holdings.csv")))
+    assert [r["ticker"] for r in rows] == ["IVV", "XTSLA", "USD", "SPX"]  # not the look-through
+    assert s.add_value_weights(rows) == ""
+    call = rows[3]
+    assert call["holding_name"] == "OCT26 SPX C @ 7625.000000"
+    assert (call["market_value"], call["notional_value"]) == (-8847792.03, -334100467.3)
+    assert call["value_weight_pct"] == pytest.approx(-2.5475, abs=1e-4)
+    assert call["weight_pct"] == -2.55
+
+
+def test_value_weights_need_market_values():
+    rows = s.parse_zacks(fixture("zacks_spy.html").decode())
+    assert s.add_value_weights(rows) == ""
+    assert all(r["value_weight_pct"] == "" for r in rows)
+
+
+def test_value_weights_skipped_when_market_values_do_not_add_up():
+    # Published weights put net assets at 1,000,000, but only 700,000 is listed.
+    rows = [holding("A", 500_000.0, 50.0), holding("B", 200_000.0, 20.0)]
+    note = s.add_value_weights(rows)
+    assert note == ("value weights not computed: market values add up to 70.0% of the net "
+                    "assets implied by the published weights")
+    assert rows[0]["value_weight_pct"] == ""
+
+
+def test_value_weights_skipped_when_some_market_values_are_missing():
+    rows = [holding("A", 500_000.0, 50.0), holding("B", None, 50.0)]
+    assert s.add_value_weights(rows) == (
+        "value weights not computed: some holdings have no market value")
+
+
 # --------------------------------------------------------------------- scraper
 
 
@@ -401,6 +470,16 @@ def test_scraper_falls_back_when_issuer_source_fails():
     assert summary["holdings_count"] == 4
     assert "ssga: HTTPError: HTTP 500" in summary["detail"]
     assert rows[0]["etf_ticker"] == "SPY" and rows[0]["source"] == "zacks"
+
+
+def test_scraper_adds_value_weights_to_rows():
+    ftls = s.Etf("FTLS", "First Trust Long/Short Equity ETF", "NYSE Arca")
+    url = "https://www.ftportfolios.com/Retail/Etf/EtfHoldings.aspx?Ticker=FTLS"
+    fetcher = FakeFetcher({url: fixture("first_trust_ftls.html")})
+    summary, rows = s.HoldingsScraper([s.FirstTrustSource(fetcher)], None).scrape(ftls)
+    assert summary["status"] == "ok" and summary["detail"] == ""
+    nvda = next(r for r in rows if r["ticker"] == "NVDA")
+    assert nvda["value_weight_pct"] == pytest.approx(6.49, abs=0.005)
 
 
 def test_scraper_reports_when_nothing_has_data():

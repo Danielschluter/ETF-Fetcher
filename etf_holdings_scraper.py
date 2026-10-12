@@ -96,12 +96,15 @@ HOLDING_FIELDS = [
     "shares",
     "price",
     "market_value",
+    "notional_value",
     "weight_pct",
+    "value_weight_pct",
     "maturity_date",
     "coupon_rate",
 ]
 HOLDING_COLUMNS = ["etf_ticker", "etf_name", "source", "as_of_date", *HOLDING_FIELDS]
-NUMERIC_FIELDS = {"shares", "price", "market_value", "weight_pct", "coupon_rate"}
+NUMERIC_FIELDS = {"shares", "price", "market_value", "notional_value", "weight_pct",
+                  "value_weight_pct", "coupon_rate"}
 
 SUMMARY_COLUMNS = [
     "ticker",
@@ -558,13 +561,17 @@ COLUMN_ALIASES = {
     "sedol": ["sedol"],
     "other_id": ["identifier", "securityid"],
     "asset_class": ["assetclass", "securitytype", "assettype", "type"],
-    "sector": ["sector", "gicssector", "industry"],
+    "sector": ["sector", "gicssector", "industry", "classification"],
     "country": ["location", "country", "countryofrisk", "locationofrisk"],
     "currency": ["currency", "localcurrency", "marketcurrency", "basecurrency"],
     "shares": ["shares", "sharesheld", "quantity", "sharesquantity", "parvalue", "par", "units",
                "sharespar", "nominal", "principal"],
     "price": ["price", "marketprice", "closingprice"],
-    "market_value": ["marketvalue", "marketvalueusd", "basemarketvalue", "value"],
+    # First Trust's "Market Value / Notional Value" holds notional amounts for derivatives;
+    # add_value_weights() moves those to notional_value.
+    "market_value": ["marketvalue", "marketvalueusd", "basemarketvalue", "value",
+                     "marketvaluenotionalvalue"],
+    "notional_value": ["notionalvalue"],
     "weight_pct": ["weightpct", "weight", "weighting", "pctofnetassets", "percentofnetassets",
                    "pctnetassets", "netassetspct", "portfolioweight", "pctoffund"],
     "maturity_date": ["maturity", "maturitydate"],
@@ -636,6 +643,53 @@ def rows_to_holdings(
     if mapping is None:
         raise NotAvailable("no holdings table found")
     return holdings, "\n".join(preamble)
+
+
+def add_value_weights(rows: list[dict]) -> str:
+    """Fill value_weight_pct: each holding's market value as a percentage of the fund's.
+
+    Issuers round published weights to 0.01%, which hides most of a fund with
+    thousands of small positions: 10,837 of AGG's 13,418 bonds show 0.00%, together
+    21.6% of the fund. Short positions and written options have negative market
+    values, so their weights are negative and the total is still 100% of net assets.
+
+    Some issuers put a derivative's notional amount in the market value column
+    (First Trust's "Market Value / Notional Value"). So each row is checked against
+    what its published weight allows, given the net assets implied by the larger
+    positions; rows that don't fit are notional amounts and move to notional_value.
+    The remaining market values must add up to those net assets. Returns why value
+    weights were not computed, or "" (also when a source has no market values).
+    """
+    if not any(isinstance(r["market_value"], float) for r in rows):
+        return ""
+    if not all(isinstance(r["market_value"], float) for r in rows):
+        return "value weights not computed: some holdings have no market value"
+    sized = [r for r in rows
+             if isinstance(r["weight_pct"], float) and abs(r["weight_pct"]) >= 0.25]
+    published = sum(r["weight_pct"] for r in sized)
+    if published < 10:
+        return "value weights not computed: too few published weights to check them against"
+    net_assets = sum(r["market_value"] for r in sized) / published * 100
+    notional = {id(r) for r in rows if not _fits_published_weight(r, net_assets)}
+    total = sum(r["market_value"] for r in rows if id(r) not in notional)
+    if abs(total / net_assets - 1) > 0.01:
+        return (f"value weights not computed: market values add up to {total / net_assets:.1%} "
+                "of the net assets implied by the published weights")
+    for row in rows:
+        if id(row) in notional:
+            row["notional_value"] = row["notional_value"] or row["market_value"]
+            row["market_value"] = ""
+        else:
+            row["value_weight_pct"] = round(row["market_value"] / total * 100, 6)
+    return ""
+
+
+def _fits_published_weight(row: dict, net_assets: float) -> bool:
+    if not isinstance(row["weight_pct"], float):
+        return True
+    computed = row["market_value"] / net_assets * 100
+    # Published weights are rounded to 0.01%; allow for that and for the estimate of net assets.
+    return abs(computed - row["weight_pct"]) <= max(0.01, 0.02 * abs(row["weight_pct"]))
 
 
 def read_csv_rows(data: bytes) -> list[list[str]]:
@@ -961,6 +1015,7 @@ class HoldingsScraper:
                 failures.append(f"{source.name}: {type(exc).__name__}: {exc}")
                 continue
 
+            value_weights_note = add_value_weights(result.rows)
             weights = [h["weight_pct"] for h in result.rows if isinstance(h["weight_pct"], float)]
             summary.update(
                 status="ok",
@@ -969,7 +1024,8 @@ class HoldingsScraper:
                 holdings_count=len(result.rows),
                 weight_sum_pct=round(sum(weights), 2) if weights else "",
                 source_url=result.url,
-                detail="; ".join(failures),
+                detail="; ".join(failures + [value_weights_note] if value_weights_note
+                                 else failures),
             )
             prefix = {"etf_ticker": etf.ticker, "etf_name": etf.name,
                       "source": result.source, "as_of_date": result.as_of}

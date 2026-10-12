@@ -81,7 +81,9 @@ the summary for the ETFs finished so far.
 | `asset_class`, `sector`, `country`, `currency` | When the source provides them |
 | `shares` | Shares, contracts, or par value for bonds |
 | `price`, `market_value` | When the source provides them |
-| `weight_pct` | Percent of net assets: `8.34` means 8.34% |
+| `notional_value` | For derivatives, when the source provides it: the exposure an option, future or swap controls, as opposed to its market value |
+| `weight_pct` | Percent of net assets as the source publishes it: `8.34` means 8.34% |
+| `value_weight_pct` | Percent of net assets computed from `market_value`, unrounded (see below). Blank when the source has no market values |
 | `maturity_date`, `coupon_rate` | For bonds, when provided |
 
 `output/etf_summary.csv`: one row per ETF with `status` (`ok` or `no_data`),
@@ -103,9 +105,31 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   five such pages in a row, Zacks is skipped for the rest of the run and those
   ETFs say so in the summary's `detail` column. Successful downloads stay
   cached for six hours, so running again later only fetches what's missing.
-- **Zacks weights are rounded to 0.01%**, so funds with thousands of tiny
-  positions can add up to well over 100% (AGG: 192%). Short positions such as
-  written options also show positive weights there.
+- **Published weights are rounded**, which matters for funds with many small
+  positions. iShares rounds to 0.01%: 10,837 of AGG's 13,418 bonds show 0.00%,
+  though together they are 21.6% of the fund, so its weights add up to 81.88%.
+  `value_weight_pct` fixes this by dividing each market value by the fund's total.
+  It is filled where the source publishes market values: iShares and First
+  Trust (both checked), and Global X if its files include them. State Street
+  and Invesco publish no market values but already give weights to six
+  decimals. Zacks rounds to 0.01% (AGG adds up to 192% there) and publishes no
+  market values, so its rows can't be corrected.
+- **How `value_weight_pct` treats shorts and derivatives.** Short positions and
+  written options have negative market values, so they get negative weights and
+  each fund still adds up to 100% of net assets. An option's weight is the value
+  of the contract, not the exposure it controls: IVVW's written calls are worth
+  −2.55% of the fund, but their notional is about −96% (`notional_value`).
+  Futures and swaps are worth little after daily settlement. First Trust lists
+  them at their notional amount in its market value column; rows whose market
+  value is far from what their published weight allows are treated as notional
+  amounts and moved to `notional_value`. If the remaining market values don't
+  add up to the fund's net assets (implied by its published weights, within 1%),
+  `value_weight_pct` is left blank for that fund and the summary's `detail`
+  column says why. Checked against AGG, IVV, IVVW, FPE and FTLS: every computed
+  weight is within 0.005 of the published one, the most rounding can hide.
+- **Fund-of-funds list their direct holdings.** IVVW's file also has a
+  look-through list of the stocks inside the IVV shares it holds; the script
+  reads the direct holdings only.
 - **Some ETFs have no holdings to list.** ETNs are bank debt, and single-asset
   trusts such as GLD or IBIT just hold the metal or the coin. They usually end
   up as `no_data`.
