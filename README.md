@@ -92,6 +92,12 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   was at least about four weeks old. That is still far fresher than SEC N-PORT
   filings (quarter-end, published ~60 days later), but for funds where daily
   data matters, add an issuer source (see below).
+- **Zacks sometimes answers with a bot check** ("Pardon Our Interruption")
+  instead of the page. The script then pauses all Zacks requests for 30, 60,
+  then 120 seconds, retrying after each pause. If Zacks keeps blocking, it is
+  skipped for the rest of the run and those ETFs say so in the summary's
+  `detail` column. Successful downloads stay cached for six hours, so running
+  again later only fetches what's missing.
 - **Zacks weights are rounded to 0.01%**, so funds with thousands of tiny
   positions can add up to well over 100% (AGG: 192%). Short positions such as
   written options also show positive weights there.

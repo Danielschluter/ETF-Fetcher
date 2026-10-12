@@ -147,6 +147,82 @@ def test_rate_limiter_spaces_requests():
     assert time.monotonic() - start >= 4 / 20 * 0.9
 
 
+# ------------------------------------------------------------------------ http
+
+
+def html_response(body: bytes, content_type: str = "text/html; charset=utf-8"):
+    resp = requests.Response()
+    resp.status_code = 200
+    resp._content = body
+    resp.headers["Content-Type"] = content_type
+    return resp
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requested = []
+
+    def get(self, url, timeout):
+        self.requested.append(url)
+        return self.responses.pop(0)
+
+
+def client_serving(responses, monkeypatch):
+    client = s.HttpClient("test", rate=1000)
+    client.BOT_CHECK_PAUSES = (0, 0, 0)
+    session = FakeSession(responses)
+    monkeypatch.setattr(client, "_session", lambda: session)
+    pauses = []
+    original_pause = s.RateLimiter.pause
+
+    def record_pause(limiter, seconds):
+        pauses.append(seconds)
+        original_pause(limiter, seconds)
+
+    monkeypatch.setattr(s.RateLimiter, "pause", record_pause)
+    return client, session, pauses
+
+
+def test_bot_check_page_is_recognized():
+    assert s.looks_like_bot_check(html_response(fixture("zacks_bot_check.html")))
+    assert not s.looks_like_bot_check(html_response(fixture("zacks_spy.html")))
+    assert not s.looks_like_bot_check(
+        html_response(b"Pardon Our Interruption", content_type="text/csv"))
+
+
+def test_bot_check_pauses_the_site_and_retries(monkeypatch):
+    holdings_page = fixture("zacks_spy.html")
+    client, session, pauses = client_serving(
+        [html_response(fixture("zacks_bot_check.html")), html_response(holdings_page)],
+        monkeypatch)
+    assert client.get(ZACKS_URL.format("SPY")) == holdings_page
+    assert len(session.requested) == 2
+    assert pauses == [0]
+
+
+def test_site_that_keeps_blocking_is_skipped(monkeypatch):
+    block = fixture("zacks_bot_check.html")
+    client, session, pauses = client_serving([html_response(block)] * 12, monkeypatch)
+    for ticker in ("A", "B", "C"):
+        with pytest.raises(s.Blocked, match="answered with a bot check"):
+            client.get(ZACKS_URL.format(ticker))
+    assert len(session.requested) == 12  # each page: first try plus one retry per pause
+    with pytest.raises(s.Blocked, match="skipped: www.zacks.com"):
+        client.get(ZACKS_URL.format("D"))
+    assert len(session.requested) == 12
+
+
+def test_blocked_response_is_not_cached(tmp_path, monkeypatch):
+    client, _, _ = client_serving([html_response(fixture("zacks_bot_check.html"))] * 4,
+                                  monkeypatch)
+    cache = s.DiskCache(tmp_path)
+    url = ZACKS_URL.format("SPY")
+    with pytest.raises(s.Blocked):
+        s.Fetcher(client, cache).get(url)
+    assert cache.read(url, max_age=60) is None
+
+
 # --------------------------------------------------------------------- sources
 
 IVV = s.Etf("IVV", "iShares Core S&P 500 ETF", "NYSE Arca")

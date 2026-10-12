@@ -125,6 +125,23 @@ class NotFound(NotAvailable):
     """HTTP 404/410."""
 
 
+class Blocked(NotAvailable):
+    """A website answered with a bot-check page instead of the content."""
+
+
+# Pages that bot-protection services (Imperva, Cloudflare) serve instead of the content.
+_BOT_CHECK = re.compile(
+    r"Pardon Our Interruption|_Incapsula_Resource|<title>\s*Just a moment\.\.\.\s*</title>",
+    re.IGNORECASE,
+)
+
+
+def looks_like_bot_check(resp: requests.Response) -> bool:
+    if "html" not in resp.headers.get("Content-Type", "") or len(resp.content) > 100_000:
+        return False
+    return bool(_BOT_CHECK.search(resp.content.decode("utf-8", errors="replace")))
+
+
 class RateLimiter:
     """Spaces requests at least 1/rate seconds apart across all threads."""
 
@@ -141,11 +158,23 @@ class RateLimiter:
         if slot > now:
             time.sleep(slot - now)
 
+    def pause(self, seconds: float) -> None:
+        """Hold every request to this host for a while."""
+        with self.lock:
+            self.next_slot = max(self.next_slot, time.monotonic() + seconds)
+
 
 class HttpClient:
-    """GET with a per-host rate limit and retries; one requests.Session per thread."""
+    """GET with a per-host rate limit and retries; one requests.Session per thread.
+
+    Bot protection (on Zacks, for one) lets most requests through but answers
+    some with a check page. Then all requests to that site pause and the page
+    is retried; a site that keeps blocking is skipped for the rest of the run.
+    """
 
     RETRY_STATUSES = {429, 500, 502, 503, 504}
+    BOT_CHECK_PAUSES = (30, 60, 120)  # seconds
+    GIVE_UP_AFTER = 3  # pages in a row still blocked after every pause
 
     def __init__(self, user_agent: str, rate: float, timeout: float = 60, retries: int = 3):
         self.headers = {
@@ -157,8 +186,10 @@ class HttpClient:
         self.timeout = timeout
         self.retries = retries
         self.local = threading.local()
+        self.lock = threading.Lock()
         self.limiters: dict[str, RateLimiter] = {}
-        self.limiters_lock = threading.Lock()
+        self.blocked_streak: Counter = Counter()
+        self.given_up: set[str] = set()
 
     def _session(self) -> requests.Session:
         session = getattr(self.local, "session", None)
@@ -168,15 +199,36 @@ class HttpClient:
             self.local.session = session
         return session
 
-    def _limiter(self, url: str) -> RateLimiter:
-        host = urlsplit(url).hostname or ""
-        with self.limiters_lock:
+    def _limiter(self, host: str) -> RateLimiter:
+        with self.lock:
             if host not in self.limiters:
                 self.limiters[host] = RateLimiter(self.rate)
             return self.limiters[host]
 
     def get(self, url: str) -> bytes:
-        limiter = self._limiter(url)
+        host = urlsplit(url).hostname or ""
+        limiter = self._limiter(host)
+        for pause in (*self.BOT_CHECK_PAUSES, None):
+            if host in self.given_up:
+                raise Blocked(f"skipped: {host} kept answering with a bot check")
+            resp = self._get_with_retries(url, limiter)
+            if not looks_like_bot_check(resp):
+                with self.lock:
+                    self.blocked_streak[host] = 0
+                return resp.content
+            if pause is not None:
+                log.warning("%s answered with a bot check; pausing requests to it for %ds",
+                            host, pause)
+                limiter.pause(pause)
+        with self.lock:
+            self.blocked_streak[host] += 1
+            if self.blocked_streak[host] >= self.GIVE_UP_AFTER and host not in self.given_up:
+                self.given_up.add(host)
+                log.error("%s keeps answering with a bot check; skipping it for the rest of "
+                          "this run. Run again later to fill in the gaps.", host)
+        raise Blocked(f"{host} answered with a bot check")
+
+    def _get_with_retries(self, url: str, limiter: RateLimiter) -> requests.Response:
         for attempt in range(self.retries + 1):
             limiter.wait()
             delay = 2.0 ** (attempt + 1)
@@ -189,7 +241,7 @@ class HttpClient:
                     raise NotFound(f"HTTP {resp.status_code}")
                 if resp.status_code not in self.RETRY_STATUSES:
                     resp.raise_for_status()
-                    return resp.content
+                    return resp
                 error = requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
                 retry_after = resp.headers.get("Retry-After", "")
                 if retry_after.isdigit():
