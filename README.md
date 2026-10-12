@@ -26,9 +26,19 @@
 
 ## Usage
 
-```bash
-pip install -r requirements.txt
+Set up once, in the project folder. A virtual environment keeps the packages
+inside the project, which Homebrew's Python on macOS requires:
 
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+In each new terminal, run `source .venv/bin/activate` first (the prompt then
+starts with `(.venv)`). Then:
+
+```bash
 python etf_holdings_scraper.py                         # all ETFs
 python etf_holdings_scraper.py --tickers SPY IVV QQQ   # a few ETFs
 python etf_holdings_scraper.py --limit 100             # first 100 tickers, alphabetically
@@ -108,6 +118,7 @@ Fidelity, VanEck, WisdomTree and Innovator.
 ## Tests
 
 ```bash
+source .venv/bin/activate
 pip install pytest
 pytest
 ```
