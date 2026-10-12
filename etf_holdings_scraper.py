@@ -48,7 +48,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence, TypeVar
 from urllib.parse import urlsplit
 
 import requests
@@ -56,6 +56,7 @@ from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 
 log = logging.getLogger("etf_holdings")
+T = TypeVar("T")
 
 # SSGA workbooks have no default style, which openpyxl warns about on every file.
 warnings.filterwarnings("ignore", message="Workbook contains no default style", module="openpyxl")
@@ -230,6 +231,10 @@ class DiskCache:
         tmp.write_bytes(gzip.compress(data, compresslevel=6))
         os.replace(tmp, path)
 
+    def delete(self, url: str) -> None:
+        if self.root is not None:
+            self._path(url).unlink(missing_ok=True)
+
 
 class Fetcher:
     """HTTP access with a cache in front of it, so reruns and resumed runs are fast."""
@@ -247,6 +252,10 @@ class Fetcher:
         data = self.http.get(url)
         self.cache.write(url, data)
         return data
+
+    def forget(self, url: str) -> None:
+        """Drop a cached response, e.g. an error page that should not be served again."""
+        self.cache.delete(url)
 
 
 # ----------------------------------------------------------------------- Universe
@@ -472,6 +481,27 @@ class Source:
     def fetch(self, etf: Etf) -> Holdings:
         raise NotImplementedError
 
+    def download(self, url: str, parse: Callable[[bytes], T]) -> T:
+        """Fetch url and parse it. A response that can't be parsed is usually an error
+        or bot-check page: it is dropped from the cache, and the error says what it was."""
+        data = self.fetcher.get(url)
+        try:
+            return parse(data)
+        except Exception as exc:
+            self.fetcher.forget(url)
+            reason = str(exc) if isinstance(exc, NotAvailable) else f"{type(exc).__name__}: {exc}"
+            raise NotAvailable(f"{reason}; {describe_response(data)}") from None
+
+
+def describe_response(data: bytes) -> str:
+    """'got an HTML page titled ...' or the first line of an unexpected response."""
+    text = data[:50_000].decode("utf-8", errors="replace")
+    title = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+    if title:
+        return f"got a {len(data):,}-byte HTML page titled {clean_text(title.group(1))[:80]!r}"
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return f"got {len(data):,} bytes starting {first[:80]!r}"
+
 
 class IsharesSource(Source):
     name = "ishares"
@@ -503,7 +533,7 @@ class IsharesSource(Source):
 
     def fetch(self, etf: Etf) -> Holdings:
         url = self.HOLDINGS.format(page=self.pages[etf.ticker], ticker=etf.ticker)
-        holdings, preamble = rows_to_holdings(read_csv_rows(self.fetcher.get(url)))
+        holdings, preamble = self.download(url, lambda d: rows_to_holdings(read_csv_rows(d)))
         return Holdings(self.name, url, find_as_of(preamble), holdings)
 
 
@@ -529,8 +559,8 @@ class SsgaSource(Source):
 
     def fetch(self, etf: Etf) -> Holdings:
         url = self.HOLDINGS.format(ticker=etf.ticker.lower())
-        rows = read_xlsx_rows(self.fetcher.get(url))
-        holdings, preamble = rows_to_holdings(rows, {"identifier": "cusip"})
+        holdings, preamble = self.download(
+            url, lambda d: rows_to_holdings(read_xlsx_rows(d), {"identifier": "cusip"}))
         return Holdings(self.name, url, find_as_of(preamble), holdings)
 
 
@@ -544,7 +574,7 @@ class InvescoSource(Source):
 
     def fetch(self, etf: Etf) -> Holdings:
         url = self.HOLDINGS.format(ticker=etf.ticker)
-        as_of, holdings = parse_invesco(json.loads(self.fetcher.get(url)))
+        as_of, holdings = self.download(url, lambda d: parse_invesco(json.loads(d)))
         return Holdings(self.name, url, as_of, holdings)
 
 
@@ -583,7 +613,8 @@ class FirstTrustSource(Source):
 
     def fetch(self, etf: Etf) -> Holdings:
         url = self.HOLDINGS.format(ticker=etf.ticker)
-        as_of, holdings = parse_first_trust(self.fetcher.get(url).decode("utf-8", errors="replace"))
+        as_of, holdings = self.download(
+            url, lambda d: parse_first_trust(d.decode("utf-8", errors="replace")))
         return Holdings(self.name, url, as_of, holdings)
 
 
@@ -623,7 +654,8 @@ class GlobalXSource(Source):
         for day in recent_business_days(self.today or dt.date.today(), self.LOOKBACK_BUSINESS_DAYS):
             url = self.HOLDINGS.format(ticker=etf.ticker.lower(), date=day)
             try:
-                data = self.fetcher.get(url)
+                holdings, preamble = self.download(
+                    url, lambda d: rows_to_holdings(read_csv_rows(d)))
             except NotFound:
                 continue
             except requests.HTTPError as exc:
@@ -631,7 +663,6 @@ class GlobalXSource(Source):
                 if exc.response is not None and exc.response.status_code == 403:
                     continue
                 raise
-            holdings, preamble = rows_to_holdings(read_csv_rows(data))
             return Holdings(self.name, url, find_as_of(preamble) or day.isoformat(), holdings)
         raise NotAvailable(
             f"no holdings file in the last {self.LOOKBACK_BUSINESS_DAYS} business days")
@@ -655,7 +686,7 @@ class ZacksSource(Source):
 
     def fetch(self, etf: Etf) -> Holdings:
         url = self.HOLDINGS.format(ticker=etf.ticker)
-        holdings = parse_zacks(self.fetcher.get(url).decode("utf-8", errors="replace"))
+        holdings = self.download(url, lambda d: parse_zacks(d.decode("utf-8", errors="replace")))
         return Holdings(self.name, url, "", holdings)
 
 

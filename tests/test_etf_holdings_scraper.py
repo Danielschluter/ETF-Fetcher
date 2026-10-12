@@ -61,6 +61,9 @@ class FakeFetcher:
             raise response
         return response
 
+    def forget(self, url):
+        pass
+
 
 def http_error(status: int) -> requests.HTTPError:
     resp = requests.Response()
@@ -282,6 +285,23 @@ def test_zacks_parser_reads_cusips_of_bonds():
     holdings = s.parse_zacks(fixture("zacks_agg.html").decode())
     assert holdings[0]["holding_name"] == "TREASURY NOTE-4.63%-02-15-35"
     assert (holdings[0]["cusip"], holdings[0]["ticker"]) == ("91282CMM0", "")
+
+
+def test_unparseable_response_is_described_and_dropped_from_cache(tmp_path):
+    url = ZACKS_URL.format("IVV")
+    block_page = b"<html><head><title>Access Denied</title></head><body>No.</body></html>"
+    cache = s.DiskCache(tmp_path)
+    fetcher = s.Fetcher(FakeHttp({url: block_page}), cache)
+    with pytest.raises(s.NotAvailable) as error:
+        s.ZacksSource(fetcher).fetch(IVV)
+    assert str(error.value) == (
+        f"no holdings on page; got a {len(block_page)}-byte HTML page titled 'Access Denied'")
+    assert cache.read(url, max_age=60) is None
+
+
+def test_describe_response_without_html_title():
+    data = b"\n\nSorry, try later\nmore"
+    assert s.describe_response(data) == f"got {len(data)} bytes starting 'Sorry, try later'"
 
 
 def test_zacks_parser_without_holdings():
