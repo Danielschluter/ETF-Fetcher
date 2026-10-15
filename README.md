@@ -15,7 +15,7 @@
    |---------------|--------------------------------------|---------------------|-----------------|
    | `ishares`     | iShares (matched by ticker on the iShares fund list) | CSV     | In file         |
    | `ssga`        | names containing "SPDR" or starting with "State Street" | Excel workbook | In file |
-   | `invesco`     | names starting with "Invesco"        | JSON API            | In response     |
+   | `invesco`     | names starting with "Invesco"        | JSON API, keyed by the CUSIP on each fund's page | In response |
    | `first_trust` | names starting with "First Trust" or "FT Vest" | HTML page | On page        |
    | `global_x`    | names starting with "Global X"       | CSV, named by date  | In file name    |
    | `zacks`       | everything else, and the fallback when an issuer source fails | Web page, loaded in headless Chrome | **Not published** |
@@ -78,7 +78,8 @@ the summary for the ETFs finished so far.
 | `etf_ticker`, `etf_name` | The ETF |
 | `source`, `as_of_date` | Where the row came from and the holdings date (blank for Zacks) |
 | `holding_name`, `ticker`, `cusip`, `isin`, `sedol`, `other_id` | The position. Each source publishes a different subset of identifiers |
-| `asset_class`, `sector`, `country`, `currency` | When the source provides them |
+| `asset_class`, `sector`, `country`, `currency` | When the source provides them; blank sectors are filled in from iShares (see below) |
+| `sector_source` | Where `sector` came from: the source's name, `ishares_lookup` if it was filled in, or blank |
 | `shares` | Shares, contracts, or par value for bonds |
 | `price`, `market_value` | When the source provides them |
 | `notional_value` | For derivatives, when the source provides it: the exposure an option, future or swap controls, as opposed to its market value |
@@ -127,6 +128,17 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   `value_weight_pct` is left blank for that fund and the summary's `detail`
   column says why. Checked against AGG, IVV, IVVW, FPE and FTLS: every computed
   weight is within 0.005 of the published one, the most rounding can hide.
+- **Sectors are filled in from iShares.** Zacks publishes no sectors and State
+  Street leaves them as "-", which left SPY, VOO, VTI and most other common ETFs
+  without any. After a run, blank sectors are filled in from how iShares
+  classifies the same security (GICS sectors), matched by ISIN, CUSIP or US
+  ticker; `sector_source` says `ishares_lookup` for those. In a check against
+  real data this covered 96–99.9% of the weight of common US equity ETFs such
+  as SPY, VOO, VTI, QQQM and SCHD; XLF was lowest at 87%. Foreign stocks and
+  bonds held through Zacks mostly stay blank, since Zacks gives them no ISIN or
+  CUSIP. Sectors First Trust and Invesco publish themselves use their own
+  names (e.g. Invesco's "Technology" rather than GICS "Information
+  Technology"), so normalize those if you compare across sources.
 - **Fund-of-funds list their direct holdings.** IVVW's file also has a
   look-through list of the stocks inside the IVV shares it holds; the script
   reads the direct holdings only.

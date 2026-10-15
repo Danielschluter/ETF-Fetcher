@@ -1,0 +1,56 @@
+{
+ "cusip": "46137V357",
+ "effectiveDate": "2026-10-13",
+ "effectiveBusinessDate": "2026-10-13",
+ "totalNumberOfHoldings": 511,
+ "holdings": [
+  {
+   "ticker": "P",
+   "issuerName": "Everpure Inc",
+   "units": 2036834,
+   "percentageOfTotalNetAssets": 0.324309,
+   "securityTypeName": "Common Stock",
+   "coupon": null,
+   "maturityDate": null,
+   "spMoodysRating": "NR/NR",
+   "marketValueBase": 319721832.98,
+   "contractExpiryDate": null,
+   "cusip": "74624M102",
+   "currency": "USD",
+   "localCurrencyName": "US Dollar",
+   "securityTypeCode": "COM"
+  },
+  {
+   "ticker": "MRNA",
+   "issuerName": "Moderna Inc",
+   "units": 1457889,
+   "percentageOfTotalNetAssets": 0.319792,
+   "securityTypeName": "Common Stock",
+   "coupon": null,
+   "maturityDate": null,
+   "spMoodysRating": "NR/NR",
+   "marketValueBase": 315268496.25,
+   "contractExpiryDate": null,
+   "cusip": "60770K107",
+   "currency": "USD",
+   "localCurrencyName": "US Dollar",
+   "securityTypeCode": "COM"
+  },
+  {
+   "ticker": "PTC",
+   "issuerName": "PTC Inc",
+   "units": 1533817,
+   "percentageOfTotalNetAssets": 0.301768,
+   "securityTypeName": "Common Stock",
+   "coupon": null,
+   "maturityDate": null,
+   "spMoodysRating": "NR/NR",
+   "marketValueBase": 297499145.32,
+   "contractExpiryDate": null,
+   "cusip": "69370C100",
+   "currency": "USD",
+   "localCurrencyName": "US Dollar",
+   "securityTypeCode": "COM"
+  }
+ ]
+}

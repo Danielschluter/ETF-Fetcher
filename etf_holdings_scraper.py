@@ -91,6 +91,7 @@ HOLDING_FIELDS = [
     "other_id",
     "asset_class",
     "sector",
+    "sector_source",
     "country",
     "currency",
     "shares",
@@ -560,7 +561,8 @@ COLUMN_ALIASES = {
     "isin": ["isin"],
     "sedol": ["sedol"],
     "other_id": ["identifier", "securityid"],
-    "asset_class": ["assetclass", "securitytype", "assettype", "type"],
+    # Not "type": iShares files with both put e.g. "EQUITY" in Type, "Equity" in Asset Class.
+    "asset_class": ["assetclass", "securitytype", "assettype"],
     "sector": ["sector", "gicssector", "industry", "classification"],
     "country": ["location", "country", "countryofrisk", "locationofrisk"],
     "currency": ["currency", "localcurrency", "marketcurrency", "basecurrency"],
@@ -572,7 +574,8 @@ COLUMN_ALIASES = {
     "market_value": ["marketvalue", "marketvalueusd", "basemarketvalue", "value",
                      "marketvaluenotionalvalue"],
     "notional_value": ["notionalvalue"],
-    "weight_pct": ["weightpct", "weight", "weighting", "pctofnetassets", "percentofnetassets",
+    "weight_pct": ["weightpct", "weight", "weighting", "marketweight", "pctofnetassets",
+                   "percentofnetassets",
                    "pctnetassets", "netassetspct", "portfolioweight", "pctoffund"],
     "maturity_date": ["maturity", "maturitydate"],
     "coupon_rate": ["couponpct", "coupon", "couponrate"],
@@ -664,8 +667,11 @@ def add_value_weights(rows: list[dict]) -> str:
         return ""
     if not all(isinstance(r["market_value"], float) for r in rows):
         return "value weights not computed: some holdings have no market value"
-    sized = [r for r in rows
-             if isinstance(r["weight_pct"], float) and abs(r["weight_pct"]) >= 0.25]
+    weighted = [r for r in rows if isinstance(r["weight_pct"], float) and r["weight_pct"] != 0]
+    # Larger positions lose least to rounding; equal-weight funds have none, so use them all.
+    sized = [r for r in weighted if abs(r["weight_pct"]) >= 0.25]
+    if sum(r["weight_pct"] for r in sized) < 10:
+        sized = weighted
     published = sum(r["weight_pct"] for r in sized)
     if published < 10:
         return "value weights not computed: too few published weights to check them against"
@@ -813,16 +819,32 @@ class SsgaSource(Source):
 
 class InvescoSource(Source):
     name = "invesco"
-    HOLDINGS = ("https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses/{ticker}"
-                "/holdings/fund?idType=ticker&interval=monthly&productType=ETF")
+    # Most funds are keyed by CUSIP (only a few, like QQQ, by ticker); the fund page says which.
+    FUND_PAGE = ("https://www.invesco.com/us/financial-products/etfs/product-detail"
+                 "?audienceType=Investor&ticker={ticker}")
+    HOLDINGS = ("https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses/{fund_id}"
+                "/holdings/fund?idType={id_type}&interval=monthly&productType=ETF")
 
     def handles(self, etf: Etf) -> bool:
         return etf.name.lower().startswith("invesco")
 
     def fetch(self, etf: Etf) -> Holdings:
-        url = self.HOLDINGS.format(ticker=etf.ticker)
+        page_url = self.FUND_PAGE.format(ticker=etf.ticker)
+        id_type, fund_id = self.download(
+            page_url, lambda d: parse_invesco_fund_id(d.decode("utf-8", errors="replace")))
+        url = self.HOLDINGS.format(fund_id=fund_id, id_type=id_type)
         as_of, holdings = self.download(url, lambda d: parse_invesco(json.loads(d)))
         return Holdings(self.name, url, as_of, holdings)
+
+
+def parse_invesco_fund_id(page: str) -> tuple[str, str]:
+    """(id type, id) from a fund page's meta tags, e.g. ("cusip", "46137V357")."""
+    meta = dict(re.findall(r'<meta\s+name="([^"]+)"\s+content="([^"]*)"', page))
+    id_type = meta.get("uniqueIdentifier", "")
+    fund_id = meta.get(id_type, "")
+    if not id_type or not fund_id:
+        raise NotAvailable("fund page has no fund identifier")
+    return id_type, fund_id
 
 
 def parse_invesco(data: dict) -> tuple[str, list[dict]]:
@@ -839,10 +861,10 @@ def parse_invesco(data: dict) -> tuple[str, list[dict]]:
             "currency": h.get("currency"),
             "shares": h.get("units"),
             "price": h.get("price"),
-            "market_value": h.get("marketValue"),
+            "market_value": h.get("marketValue", h.get("marketValueBase")),
             "weight_pct": h.get("percentageOfTotalNetAssets"),
             "maturity_date": h.get("maturityDate"),
-            "coupon_rate": h.get("couponRate"),
+            "coupon_rate": h.get("couponRate", h.get("coupon")),
         })
         for h in data.get("holdings") or []
     ]
@@ -1029,11 +1051,76 @@ class HoldingsScraper:
             )
             prefix = {"etf_ticker": etf.ticker, "etf_name": etf.name,
                       "source": result.source, "as_of_date": result.as_of}
-            return summary, [{**prefix, **h} for h in result.rows]
+            rows = [{**prefix, **h} for h in result.rows]
+            for row in rows:
+                row["sector_source"] = result.source if row["sector"] else ""
+            return summary, rows
 
         summary.update(status="no_data",
                        detail="; ".join(failures) or "no source covers this ETF")
         return summary, []
+
+
+# ---------------------------------------------------------------------- Sectors
+
+
+def _ticker_key(ticker: str) -> str:
+    """'BRK.B', 'BRK/B' and 'BRKB' all match."""
+    return re.sub(r"[^A-Z0-9]", "", ticker.upper())
+
+
+class SectorLookup:
+    """Sectors of securities as iShares classifies them, to fill sectors other sources leave blank.
+
+    Zacks publishes no sectors and State Street's files leave them as "-". Using a
+    single issuer's classification keeps one taxonomy (iShares uses GICS sectors).
+    Securities match by ISIN or CUSIP, or by ticker for US-listed ones.
+    """
+
+    SOURCE = "ishares"
+
+    def __init__(self):
+        self.by_id: dict[str, str] = {}
+        self.by_ticker: dict[str, str] = {}
+
+    def learn(self, row: dict) -> None:
+        if row["source"] != self.SOURCE or not row["sector"]:
+            return
+        if "equity" not in str(row["asset_class"]).lower():
+            return  # cash, futures and the like are "Cash and/or Derivatives"
+        for key in (row["isin"], row["cusip"]):
+            if key:
+                self.by_id.setdefault(key, row["sector"])
+        if row["ticker"] and row["country"] in ("United States", ""):
+            self.by_ticker.setdefault(_ticker_key(row["ticker"]), row["sector"])
+
+    def lookup(self, row: dict) -> str:
+        for key in (row.get("isin"), row.get("cusip")):
+            if key and key in self.by_id:
+                return self.by_id[key]
+        ticker = row.get("ticker")
+        return self.by_ticker.get(_ticker_key(ticker), "") if ticker else ""
+
+
+def backfill_sectors(path: Path, lookup: SectorLookup) -> tuple[int, int]:
+    """Fill blank sectors in a holdings CSV in place. Returns (filled, still blank)."""
+    filled = blank = 0
+    tmp = path.with_name(f"{path.name}.tmp")
+    with path.open(newline="", encoding="utf-8") as src, \
+            tmp.open("w", newline="", encoding="utf-8") as dst:
+        writer = csv.DictWriter(dst, fieldnames=HOLDING_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in csv.DictReader(src):
+            if not row["sector"]:
+                sector = lookup.lookup(row)
+                if sector:
+                    row["sector"], row["sector_source"] = sector, f"{SectorLookup.SOURCE}_lookup"
+                    filled += 1
+                else:
+                    blank += 1
+            writer.writerow(row)
+    os.replace(tmp, path)
+    return filled, blank
 
 
 # -------------------------------------------------------------------------- Main
@@ -1138,6 +1225,7 @@ def scrape_all(args: argparse.Namespace, etfs: list[Etf], scraper: HoldingsScrap
     summary_path = args.output_dir / "etf_summary.csv"
     summaries: list[dict] = []
     statuses: Counter = Counter()
+    sectors = SectorLookup()
     holdings_total = 0
     interrupted = False
     started = time.monotonic()
@@ -1151,6 +1239,8 @@ def scrape_all(args: argparse.Namespace, etfs: list[Etf], scraper: HoldingsScrap
             for done, future in enumerate(as_completed(futures), 1):
                 summary, rows = future.result()
                 writer.writerows(rows)  # only this thread writes, so no lock is needed
+                for row in rows:
+                    sectors.learn(row)
                 summaries.append(summary)
                 statuses[summary["source"] or summary["status"]] += 1
                 holdings_total += len(rows)
@@ -1165,6 +1255,8 @@ def scrape_all(args: argparse.Namespace, etfs: list[Etf], scraper: HoldingsScrap
         else:
             pool.shutdown()
 
+    filled, blank = backfill_sectors(holdings_path, sectors)
+    log.info("Filled in sectors from iShares for %d holdings; %d still have none", filled, blank)
     summaries.sort(key=lambda s: s["ticker"])
     write_csv(summary_path, SUMMARY_COLUMNS, summaries)
     found = sum(1 for s in summaries if s["status"] == "ok")

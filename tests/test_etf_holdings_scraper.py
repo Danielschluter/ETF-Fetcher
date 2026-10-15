@@ -237,6 +237,14 @@ SPY_URL = ("https://www.ssga.com/library-content/products/fund-data/etfs/us/"
            "holdings-daily-us-en-spy.xlsx")
 QQQ_URL = ("https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses/QQQ/holdings/fund"
            "?idType=ticker&interval=monthly&productType=ETF")
+INVESCO_PAGE = ("https://www.invesco.com/us/financial-products/etfs/product-detail"
+                "?audienceType=Investor&ticker={}")
+# A fund keyed by ticker, as QQQ's holdings are.
+QQQ_PAGE = (b'<meta name="cusip" content="46090E103">'
+            b'<meta name="uniqueIdentifier" content="ticker"><meta name="ticker" content="QQQ">')
+RSP = s.Etf("RSP", "Invesco S&P 500 Equal Weight ETF", "NYSE Arca")
+RSP_URL = ("https://dng-api.invesco.com/cache/v1/accounts/en_US/shareclasses/46137V357/holdings/"
+           "fund?idType=cusip&interval=monthly&productType=ETF")
 FPE_URL = "https://www.ftportfolios.com/Retail/Etf/EtfHoldings.aspx?Ticker=FPE"
 QYLD_URL = "https://assets.globalxetfs.com/funds/holdings/qyld_full-holdings_{}.csv"
 ZACKS_URL = "https://www.zacks.com/funds/etf/{}/holding"
@@ -273,6 +281,15 @@ def test_ishares_source():
     assert result.rows[3]["asset_class"] == "Futures" and result.rows[3]["country"] == ""
 
 
+def test_ishares_market_weight_layout():
+    # Some iShares funds name the column "Market Weight" and add a "Type" column.
+    rows, preamble = s.rows_to_holdings(s.read_csv_rows(fixture("ishares_iai_holdings.csv")))
+    assert s.find_as_of(preamble) == "2026-10-13"
+    gs = rows[0]
+    assert (gs["ticker"], gs["weight_pct"], gs["asset_class"]) == ("GS", 17.84, "Equity")
+    assert rows[2]["asset_class"] == "Futures" and rows[2]["weight_pct"] == ""
+
+
 def test_ishares_without_fund_list_handles_nothing():
     source = s.IsharesSource(FakeFetcher({}))
     source.prepare()
@@ -294,8 +311,29 @@ def test_ssga_source():
     assert result.rows[2]["sedol"] == ""
 
 
-def test_invesco_source():
-    source = s.InvescoSource(FakeFetcher({QQQ_URL: fixture("invesco_qqq.json")}))
+def test_invesco_source_by_cusip():
+    source = s.InvescoSource(FakeFetcher({
+        INVESCO_PAGE.format("RSP"): fixture("invesco_rsp_page.html"),
+        RSP_URL: fixture("invesco_rsp.json"),
+    }))
+    assert source.handles(RSP)
+    result = source.fetch(RSP)
+    assert result.url == RSP_URL and result.as_of == "2026-10-13"
+    first = result.rows[0]
+    assert (first["ticker"], first["cusip"], first["weight_pct"]) == ("P", "74624M102", 0.324309)
+    assert first["market_value"] == 319721832.98
+
+
+def test_invesco_fund_page_without_identifier():
+    with pytest.raises(s.NotAvailable):
+        s.parse_invesco_fund_id("<html><head><title>Not found</title></head></html>")
+
+
+def test_invesco_source_by_ticker():
+    source = s.InvescoSource(FakeFetcher({
+        INVESCO_PAGE.format("QQQ"): QQQ_PAGE,
+        QQQ_URL: fixture("invesco_qqq.json"),
+    }))
     assert source.handles(QQQ) and not source.handles(SPY)
     result = source.fetch(QQQ)
     assert result.as_of == "2026-10-09"
@@ -433,6 +471,13 @@ def test_value_weights_with_written_options():
     assert call["weight_pct"] == -2.55
 
 
+def test_value_weights_for_equal_weight_funds():
+    # 500 positions of 0.2% each: none is large enough for the usual check.
+    rows = [holding(f"stock {i}", 2000.0, 0.2) for i in range(500)]
+    assert s.add_value_weights(rows) == ""
+    assert rows[0]["value_weight_pct"] == 0.2
+
+
 def test_value_weights_need_market_values():
     rows = s.parse_zacks(fixture("zacks_spy.html").decode())
     assert s.add_value_weights(rows) == ""
@@ -521,6 +566,7 @@ def test_run_writes_holdings_and_summary(tmp_path):
         IVV_URL: fixture("ishares_ivv_holdings.csv"),
         SPY_URL: ssga_workbook(),
         QQQ_URL: fixture("invesco_qqq.json"),
+        INVESCO_PAGE.format("QQQ"): QQQ_PAGE,
         FPE_URL: fixture("first_trust_fpe.html"),
         ZACKS_URL.format("VOO"): fixture("zacks_spy.html"),
     }
@@ -556,6 +602,34 @@ def test_run_writes_holdings_and_summary(tmp_path):
     assert counts == {"FPE": 4, "IVV": 4, "QQQ": 5, "SPY": 3, "VOO": 4}
     spy_nvda = next(r for r in holdings if r["etf_ticker"] == "SPY" and r["ticker"] == "NVDA")
     assert spy_nvda["weight_pct"] == "8.336249" and spy_nvda["as_of_date"] == "2026-10-08"
+
+
+def test_sector_lookup_fills_blanks_from_ishares(tmp_path):
+    def row(source, ticker, sector, **extra):
+        base = {c: "" for c in s.HOLDING_COLUMNS}
+        base.update(source=source, ticker=ticker, sector=sector, asset_class="Equity",
+                    country="United States", sector_source=source if sector else "")
+        base.update(extra)
+        return base
+
+    lookup = s.SectorLookup()
+    for r in [row("ishares", "BRKB", "Financials"),
+              row("ishares", "NVDA", "Information Technology"),
+              row("ishares", "", "Health Care", isin="US0000000001"),
+              row("ishares", "USD", "Cash and/or Derivatives", asset_class="Cash"),
+              row("first_trust", "XOM", "Energy")]:
+        lookup.learn(r)
+    path = tmp_path / "holdings.csv"
+    s.write_csv(path, s.HOLDING_COLUMNS, [
+        row("zacks", "BRK.B", ""), row("zacks", "NVDA", ""),
+        row("ssga", "", "", isin="US0000000001"), row("zacks", "XOM", ""),
+        row("zacks", "USD", ""), row("invesco", "AAPL", "Technology")])
+    assert s.backfill_sectors(path, lookup) == (3, 2)
+    with path.open() as fh:
+        out = list(csv.DictReader(fh))
+    assert [(r["sector"], r["sector_source"]) for r in out] == [
+        ("Financials", "ishares_lookup"), ("Information Technology", "ishares_lookup"),
+        ("Health Care", "ishares_lookup"), ("", ""), ("", ""), ("Technology", "invesco")]
 
 
 def test_disk_cache_round_trip(tmp_path):

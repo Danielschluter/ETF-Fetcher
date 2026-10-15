@@ -1,0 +1,15 @@
+iShares U.S. Broker-Dealers & Securities Exchanges ETF
+Fund Holdings as of,"Oct 13, 2026"
+Inception Date,"May 01, 2006"
+Shares Outstanding,"7,250,000.00"
+Stock,"-"
+Bond,"-"
+Cash,"-"
+Other,"-"
+
+Ticker,Name,Type,Sector,Asset Class,Market Value,Notional Value,Quantity,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date,Market Weight,Notional Weight
+"GS","GOLDMAN SACHS GROUP","EQUITY","Financials","Equity","229,507,173.11","229,507,173.11","257,321.00","891.91","United States","NYSE","USD","1.00","USD","-","17.84","17.84"
+"SCHW","CHARLES SCHWAB","EQUITY","Financials","Equity","118,783,314.00","118,783,314.00","1,238,100.00","95.94","United States","NYSE","USD","1.00","USD","-","9.24","9.23"
+"RTYZ6","RUSSELL 2000 EMINI CME DEC 26","INDEX","Cash and/or Derivatives","Futures","0.00","140,005.00","1.00","2,800.10","-","Chicago Mercantile Exchange","USD","1.00","USD","-","-","0.01"
+"USD","USD CASH","CASH","Cash and/or Derivatives","Cash","0.00","0.00","-13,397.00","100.00","United States","-","USD","1.00","USD","-","-","-"
+
