@@ -701,6 +701,118 @@ def test_direxion_source():
         "NVIDIA CORP", "67066G104", 661671.0, 6.32)
 
 
+DIMENSIONAL_URL = "https://tools-blob.dimensional.com/etf/{}/DFAC.csv"
+
+
+def test_dimensional_source_looks_back_for_latest_file():
+    dfac = s.Etf("DFAC", "Dimensional U.S. Core Equity 2 ETF", "NYSE Arca")
+    fetcher = FakeFetcher(
+        {DIMENSIONAL_URL.format("20261013"): fixture("dimensional_dfac_holdings.csv")})
+    source = s.DimensionalSource(fetcher, today=dt.date(2026, 10, 15))
+    assert source.handles(dfac) and not source.handles(SPY)
+    result = source.fetch(dfac)
+    assert fetcher.requested == [
+        DIMENSIONAL_URL.format(day) for day in ("20261015", "20261014", "20261013")]
+    assert result.as_of == "2026-10-13"
+    assert [h["ticker"] for h in result.rows] == ["AIR", "", "", "AAPL", "NVDA", "LPG"]
+    nvda = result.rows[4]
+    assert (nvda["holding_name"], nvda["cusip"], nvda["isin"], nvda["sedol"]) == (
+        "NVIDIA CORP COMMON STOCK USD.001", "67066G104", "US67066G1040", "2379504")
+    assert (nvda["shares"], nvda["market_value"]) == (22553641.0, 5153958041.32)
+    assert nvda["weight_pct"] == 5.81701798  # published as the fraction 0.0581701798
+    assert result.rows[0]["weight_pct"] == 0.01619189
+
+
+AVANTIS_HOLDINGS = ("https://www.avantisinvestors.com/avantis-investments/total-holdings/{}/"
+                    "?type=etf")
+AVUS = s.Etf("AVUS", "Avantis U.S. Equity ETF", "NYSE Arca")
+
+
+def test_avantis_source_finds_fund_numbers_on_the_fund_list():
+    fetcher = FakeFetcher({
+        s.AvantisSource.FUND_LIST: fixture("avantis_fund_list.html"),
+        AVANTIS_HOLDINGS.format(114): fixture("avantis_avus_holdings.html"),
+    })
+    source = s.AvantisSource(fetcher)
+    source.prepare()
+    assert source.numbers == {"AVUS": "114", "AVUV": "119"}  # not the AVUSX mutual fund
+    assert source.handles(AVUS) and not source.handles(SPY)
+    result = source.fetch(AVUS)
+    assert result.url == AVANTIS_HOLDINGS.format(114) and result.as_of == "2026-10-13"
+    assert [h["ticker"] for h in result.rows] == ["NVDA", "AAPL", "MSFT", "SKYD/WS", ""]
+    nvda = result.rows[0]
+    assert (nvda["holding_name"], nvda["cusip"], nvda["isin"], nvda["sedol"]) == (
+        "NVIDIA CORP COMMON STOCK USD.001", "67066G104", "US67066G1040", "2379504")
+    assert (nvda["shares"], nvda["market_value"], nvda["weight_pct"]) == (
+        3737604.0, 854117266.08, 5.75)
+    assert (nvda["asset_class"], nvda["sector"], nvda["country"]) == (
+        "COMMON STOCK", "INFORMATION TECHNOLOGY", "UNITED STATES")
+    warrant, dollars = result.rows[3:]
+    assert (warrant["market_value"], warrant["weight_pct"]) == ("", "")
+    assert (dollars["holding_name"], dollars["asset_class"], dollars["shares"]) == (
+        "US DOLLAR", "", -253137.0)
+
+
+def test_american_century_source():
+    sdsi = s.Etf("SDSI", "American Century Short Duration Strategic Income ETF", "NYSE Arca")
+    holdings_url = "https://www.americancentury.com/invest/funds/total-holdings/724/?type=etf"
+    source = s.AmericanCenturySource(FakeFetcher({
+        s.AmericanCenturySource.FUND_LIST: fixture("american_century_fund_list.html"),
+        holdings_url: fixture("american_century_sdsi_holdings.html"),
+    }))
+    source.prepare()
+    assert source.numbers == {"SDSI": "724", "QGRO": "495"}
+    result = source.fetch(sdsi)
+    assert result.as_of == "2026-10-13"
+    note, future, swap = result.rows[:3]
+    assert (note["holding_name"], note["cusip"], note["coupon_rate"], note["maturity_date"]) == (
+        "US TREASURY N/B 09/28 4.75", "91282CRP8", 4.75, "2028-09-30")
+    assert (note["shares"], note["weight_pct"], note["asset_class"]) == (
+        53440000.0, 15.92, "U.S. TREASURY NOTES")
+    assert (future["ticker"], future["market_value"], future["weight_pct"]) == (
+        "TUZ26", 8879.54, 8.87)
+    assert swap["asset_class"] == "CREDIT DEFAULT SWAPS"
+
+
+def test_american_century_without_fund_list_handles_nothing():
+    source = s.AmericanCenturySource(FakeFetcher({}))
+    source.prepare()
+    assert not source.handles(
+        s.Etf("SDSI", "American Century Short Duration Strategic Income ETF", ""))
+
+
+def test_js_array_items_ignore_brackets_inside_strings():
+    text = 'x:[{name:"A ]} \\"B\\"",ticker:"A"},{name:"C",ticker:null}],y:1'
+    items = s.js_array_items(text, text.index("["))
+    assert [s._js_fields(i) for i in items] == [
+        {"name": 'A ]} "B"', "ticker": "A"}, {"name": "C", "ticker": ""}]
+    with pytest.raises(s.NotAvailable):
+        s.js_array_items(text[:20], text.index("["))
+
+
+def test_fidelity_source():
+    ftec = s.Etf("FTEC", "Fidelity MSCI Information Technology Index ETF", "NYSE Arca")
+    url = ("https://research2.fidelity.com/fidelity/screeners/etf/etfholdings.asp"
+           "?symbol=FTEC&view=Holdings")
+    source = s.FidelitySource(FakeFetcher({url: fixture("fidelity_ftec_holdings.html")}))
+    assert source.handles(ftec) and not source.handles(SPY)
+    result = source.fetch(ftec)
+    assert result.as_of == "2026-09-30"
+    assert [(h["ticker"], h["holding_name"], h["weight_pct"]) for h in result.rows] == [
+        ("NVDA", "NVIDIA Corp", 17.61), ("AAPL", "Apple Inc", 15.95),
+        ("", "Net Other Assets", 0.79),
+        ("XAKZ26", "E-mini Technology Select Sector Future Dec 26", 0.0),
+        ("", "Pivotal Software Inc Cvr", 0.0)]
+
+
+def test_fidelity_page_without_holdings():
+    page = ('<h3 class="num-results">Basket Holdings: 0<span class="timestamp">AS OF 09/30/2026'
+            '</span></h3><table class="results-table"><thead><tr><th>Symbol</th><th>Company</th>'
+            '<th>Weight</th></tr></thead><tbody><tr class="highlight"><td colspan="3">The search '
+            'entry provided does not yield any results</td></tr></tbody></table>')
+    assert s.parse_fidelity(page) == ("2026-09-30", [])
+
+
 # --------------------------------------------------------------- value weights
 
 

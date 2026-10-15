@@ -26,10 +26,16 @@
    | `vaneck`      | names starting with "VanEck"         | Excel workbook      | In file         |
    | `ark`         | names starting with "ARK"            | CSV, linked from the fund page | In file |
    | `direxion`    | names starting with "Direxion"       | CSV                 | In file, if given |
+   | `dimensional` | names starting with "Dimensional"    | CSV, named by date  | In file         |
+   | `avantis`     | Avantis (matched by ticker on the Avantis fund list) | Data embedded in the holdings page | On page |
+   | `american_century` | American Century (matched by ticker on its fund list) | Data embedded in the holdings page | On page |
+   | `fidelity`    | names starting with "Fidelity"       | HTML page, weights only | On page (**month end**) |
    | `zacks`       | everything else, and the fallback when an issuer source fails | Web page, loaded in headless Chrome | **Not published** |
 
-   Together the issuer sources cover about 2,100 of the 5,800 ETFs, including
-   most of the largest.
+   Together the issuer sources cover about 2,300 of the 5,800 ETFs, including
+   most of the largest. Goldman Sachs is not among them yet: its site loads
+   holdings through a query that needs the page's own request format, which
+   couldn't be captured here (see "Adding an issuer").
 
    When a source has no file for a fund, errors out, or returns no rows, the
    next source is tried. The summary file records which source was used and why
@@ -74,7 +80,7 @@ the summary for the ETFs finished so far.
 |---|---|---|
 | `--tickers` | all ETFs | Space or comma separated |
 | `--limit N` | | Only the first N ETFs |
-| `--sources` | all issuer sources | Any of `ishares ssga invesco first_trust global_x vanguard proshares innovator pacer schwab vaneck ark direxion` |
+| `--sources` | all issuer sources | Any of `ishares ssga invesco first_trust global_x vanguard proshares innovator pacer schwab vaneck ark direxion dimensional avantis american_century fidelity` |
 | `--no-fallback` | | Don't use Zacks (no browser needed) |
 | `--browser` | `chrome` | `chrome` (installed Google Chrome), `chromium` (after `playwright install chromium`), or a path to a browser |
 | `--browser-workers` | 4 | Browsers loading Zacks pages in parallel |
@@ -127,13 +133,15 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   though together they are 21.6% of the fund, so its weights add up to 81.88%.
   `value_weight_pct` fixes this by dividing each market value by the fund's total.
   It is filled where the source publishes market values: iShares, First
-  Trust and Innovator (all checked; for Innovator, every one of its 179
-  funds), and Vanguard, ProShares, Pacer, VanEck, ARK, Direxion and Global X
-  when their files include them. State Street and Invesco publish no market
-  values but already give weights to six decimals. Schwab rounds its market
-  values to a few digits ("$5.2B"), so they are left blank. Zacks rounds to
-  0.01% (AGG adds up to 192% there) and publishes no market values, so its
-  rows can't be corrected.
+  Trust, Innovator (every one of its 179 funds), Dimensional, Avantis and
+  American Century (all checked), and Vanguard, ProShares, Pacer, VanEck, ARK,
+  Direxion and Global X when their files include them. State Street and
+  Invesco publish no market values but already give weights to six decimals.
+  Schwab rounds its market values to a few digits ("$5.2B"), so they are left
+  blank. Fidelity's pages give weights only. Zacks rounds to 0.01% (AGG adds
+  up to 192% there) and publishes no market values, so its rows can't be
+  corrected. Dimensional publishes weights as fractions (0.0567); they are
+  converted to percent like the others.
 - **How `value_weight_pct` treats shorts and derivatives.** Short positions and
   written options have negative market values, so they get negative weights and
   each fund still adds up to 100% of net assets. An option's weight is the value
@@ -141,18 +149,31 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   −2.55% of the fund, but their notional is about −96% (`notional_value`).
   Futures and swaps are worth little after daily settlement. First Trust lists
   them at their notional amount in its market value column; rows whose market
-  value is far from what their published weight allows are treated as notional
-  amounts and moved to `notional_value`. If the remaining market values don't
-  add up to the fund's net assets (implied by its published weights, within 1%),
+  value is far larger than their published weight allows are treated as
+  notional amounts and moved to `notional_value`. American Century does the
+  opposite: it weights futures, swaps and currency forwards by their exposure
+  (SDSI's Treasury future: 8.87%) while their market value is the day's gain
+  or loss, so their `value_weight_pct` is small (0.003%) and the published
+  weight is the exposure. If the remaining market values don't add up to the
+  fund's net assets (implied by its published weights, within 1%),
   `value_weight_pct` is left blank for that fund and the summary's `detail`
-  column says why. Checked against AGG, IVV, IVVW, FPE and FTLS: every computed
-  weight is within 0.005 of the published one, the most rounding can hide.
+  column says why. Holdings with neither a market value nor a weight, such as
+  Avantis' worthless warrants, are left out. Checked against AGG, IVV, IVVW,
+  FPE and FTLS: every computed weight is within 0.005 of the published one, the
+  most rounding can hide.
 - **Vanguard publishes month-end holdings**, a few weeks after the month ends:
   on 2026-10-15 its newest were as of 2026-08-31. That is dated and complete
   (with CUSIP, ISIN, SEDOL and market values), but can be older than Zacks. To
   use Zacks for Vanguard funds instead, leave `vanguard` out of `--sources`.
   Bonds come with their par value in `shares`; pools of mortgages give a range
   of maturities, written as `2027-11-01/2056-10-01`.
+- **Fidelity's holdings are month-end, with weights only.** They come from
+  the research pages on Fidelity's site: on 2026-10-15, FTEC's were as of
+  2026-09-30 and the actively managed FBCG's as of 2026-08-31, since Fidelity's
+  active equity ETFs disclose their full holdings a month later (daily they
+  publish only a stand-in "tracking basket"). No share counts or market
+  values. To use Zacks for Fidelity funds instead, leave `fidelity` out of
+  `--sources`.
 - **Leveraged and inverse funds list their exposure.** ProShares gives swaps
   and futures an exposure weight and an exposure value (`notional_value`) but
   no market value; their gains and losses are in the "Net Other Assets" row.
@@ -199,11 +220,16 @@ Pacer's and Innovator's files share one layout (Date, Account, StockTicker,
 CUSIP, SecurityName, Shares, Price, MarketValue, Weightings, NetAssets...),
 from their fund administrator, U.S. Bank; other funds it administers may
 publish the same columns, which are already mapped. Remaining issuers by fund
-count: Corgi, Leverage Shares, GraniteShares, Defiance, Fidelity, Tradr,
-JPMorgan, PGIM, Franklin and WisdomTree. Of those checked so far, Defiance's
+count: Corgi, Leverage Shares, GraniteShares, Defiance, Tradr, JPMorgan, PGIM,
+Franklin, Goldman Sachs and WisdomTree. Of those checked so far, Defiance's
 site blocked the tool used to capture samples, WisdomTree's holdings files
 are addressed by document IDs rather than tickers, and JPMorgan's fund pages
-load their data with JavaScript.
+load their data with JavaScript. Goldman Sachs's fund pages fetch "All
+Holdings" with a GraphQL POST to `https://am.gs.com/services/funds` (query
+`getFundsDetail`, fragment `allHoldings`); its request variables weren't
+recoverable from the site's scripts. Copying that request from a browser's
+developer tools (Network tab, then "download" under All Holdings on a fund
+page) would give everything needed to add it.
 
 ## Tests
 
@@ -221,4 +247,5 @@ from real downloads (a few counts edited to match the trimmed rows, as the
 tests note), except the Global X and Direxion holdings files: those sites
 blocked the tool used to capture the others, so their samples are
 representative. The VanEck workbook is rebuilt in the test from rows of a real
-download.
+download, and the Avantis and American Century samples keep the real holdings
+data embedded in those pages but not the rest of the page around it.
