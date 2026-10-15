@@ -1,0 +1,35 @@
+{
+ "size": 3,
+ "asOfDate": "2026-08-31T00:00:00-04:00",
+ "self": {
+  "type": "application/xml,application/json",
+  "href": "http://api.vanguard.com/rs/ire/01/ind/fund/VOO/portfolio-holding/stock?start=501&count=500",
+  "ref": "self"
+ },
+ "prev": {
+  "type": "application/xml,application/json",
+  "href": "http://api.vanguard.com/rs/ire/01/ind/fund/VOO/portfolio-holding/stock?start=1&count=500",
+  "ref": "prev"
+ },
+ "fund": {
+  "entity": [
+   {
+    "type": "portfolioHolding",
+    "asOfDate": "2026-08-31T00:00:00-04:00",
+    "longName": "Brown-Forman Corp. Class B",
+    "shortName": "BROWN-FORMAN -B",
+    "sharesHeld": "4471655",
+    "marketValue": 118811873.35,
+    "ticker": "BF.B",
+    "isin": "US1156372096",
+    "percentWeight": "0.01",
+    "notionalValue": "0",
+    "secMainType": "",
+    "secSubType": "",
+    "holdingType": "",
+    "cusip": "115637209",
+    "sedol": "2146838"
+   }
+  ]
+ }
+}

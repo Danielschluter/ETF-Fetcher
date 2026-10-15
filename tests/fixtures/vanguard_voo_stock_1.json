@@ -1,0 +1,52 @@
+{
+ "size": 3,
+ "asOfDate": "2026-08-31T00:00:00-04:00",
+ "self": {
+  "type": "application/xml,application/json",
+  "href": "http://api.vanguard.com/rs/ire/01/ind/fund/VOO/portfolio-holding/stock?start=1&count=500",
+  "ref": "self"
+ },
+ "next": {
+  "type": "application/xml,application/json",
+  "href": "http://api.vanguard.com/rs/ire/01/ind/fund/VOO/portfolio-holding/stock?start=501&count=500",
+  "ref": "next"
+ },
+ "fund": {
+  "entity": [
+   {
+    "type": "portfolioHolding",
+    "asOfDate": "2026-08-31T00:00:00-04:00",
+    "longName": "NVIDIA Corp.",
+    "shortName": "NVIDIA CORP",
+    "sharesHeld": "643435730",
+    "marketValue": 142057740469.4,
+    "ticker": "NVDA",
+    "isin": "US67066G1040",
+    "percentWeight": "8.08",
+    "notionalValue": "0",
+    "secMainType": "",
+    "secSubType": "",
+    "holdingType": "",
+    "cusip": "67066G104",
+    "sedol": "2379504"
+   },
+   {
+    "type": "portfolioHolding",
+    "asOfDate": "2026-08-31T00:00:00-04:00",
+    "longName": "Apple Inc.",
+    "shortName": "APPLE INC",
+    "sharesHeld": "390202069",
+    "marketValue": 123635525562.65,
+    "ticker": "AAPL",
+    "isin": "US0378331005",
+    "percentWeight": "7.03",
+    "notionalValue": "0",
+    "secMainType": "",
+    "secSubType": "",
+    "holdingType": "",
+    "cusip": "037833100",
+    "sedol": "2046251"
+   }
+  ]
+ }
+}

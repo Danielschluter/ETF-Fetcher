@@ -1,0 +1,58 @@
+{
+ "size": 2,
+ "asOfDate": "2026-08-31T00:00:00-04:00",
+ "self": {
+  "type": "application/xml,application/json",
+  "href": "http://api.vanguard.com/rs/ire/01/ind/fund/BND/portfolio-holding/bond?start=1&count=3000",
+  "ref": "self"
+ },
+ "next": {
+  "type": "application/xml,application/json",
+  "href": "http://api.vanguard.com/rs/ire/01/ind/fund/BND/portfolio-holding/bond?start=3001&count=3000",
+  "ref": "next"
+ },
+ "fund": {
+  "entity": [
+   {
+    "type": "portfolioHolding",
+    "asOfDate": "2026-08-31T00:00:00-04:00",
+    "longName": "Federal National Mortgage Assn.",
+    "shortName": "Federal National Mortgage Assn.",
+    "sharesHeld": "0",
+    "marketValue": 5466195898.57,
+    "couponRate": "2.000",
+    "maturityDate": "11/01/2027-10/01/2056",
+    "faceAmount": "6743672547",
+    "ticker": "",
+    "isin": "",
+    "percentWeight": "1.37",
+    "notionalValue": "0",
+    "secMainType": "",
+    "secSubType": "",
+    "holdingType": "",
+    "cusip": "",
+    "sedol": ""
+   },
+   {
+    "type": "portfolioHolding",
+    "asOfDate": "2026-08-31T00:00:00-04:00",
+    "longName": "United States Treasury Note/Bond",
+    "shortName": "US TREASURY N/B",
+    "sharesHeld": "0",
+    "marketValue": 1899290322.61,
+    "couponRate": "3.500",
+    "maturityDate": "01/31/2028",
+    "faceAmount": "1920217700",
+    "ticker": "TNOTE",
+    "isin": "US91282CGH88",
+    "percentWeight": "0.48",
+    "notionalValue": "0",
+    "secMainType": "",
+    "secSubType": "",
+    "holdingType": "",
+    "cusip": "91282CGH8",
+    "sedol": "BL6BW07"
+   }
+  ]
+ }
+}

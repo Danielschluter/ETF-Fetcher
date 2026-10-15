@@ -9,7 +9,19 @@ plus a catch-all source for every ETF without a dedicated issuer scraper:
   invesco      Invesco holdings API
   first_trust  First Trust holdings page
   global_x     Global X daily holdings CSV
-  zacks        Zacks ETF holdings page: used for all other ETFs, and as the
+  vanguard     Vanguard holdings API (month-end holdings)
+  proshares    ProShares fund page
+  innovator    Innovator daily holdings CSV, one file for all its funds
+  pacer        Pacer daily holdings CSV
+  schwab       Schwab all-holdings pages
+  vaneck       VanEck daily holdings workbook
+  ark          ARK daily holdings CSV
+  direxion     Direxion daily holdings CSV
+  dimensional  Dimensional daily holdings CSV
+  avantis      Avantis total-holdings page (American Century)
+  american_century  American Century total-holdings page
+  fidelity     Fidelity research holdings page (month-end holdings, weights only)
+  zacks       Zacks ETF holdings page: used for all other ETFs, and as the
                fallback whenever an issuer source fails. Zacks turns away plain
                HTTP clients, so its pages are loaded in headless Chrome (via
                Playwright). Zacks does not say which date its holdings are as
@@ -43,6 +55,7 @@ import logging
 import os
 import queue
 import re
+import statistics
 import sys
 import threading
 import time
@@ -72,6 +85,9 @@ DEFAULT_USER_AGENT = (
 )
 HOLDINGS_TTL = 6 * 3600  # issuers publish once per business day
 REFERENCE_TTL = 24 * 3600
+
+# Websites whose robots.txt asks for more seconds between requests than --rate allows.
+CRAWL_DELAYS = {"www.vaneck.com": 25}
 
 EXCHANGES = {
     "A": "NYSE American",
@@ -211,7 +227,8 @@ class HttpClient:
     def _limiter(self, host: str) -> RateLimiter:
         with self.lock:
             if host not in self.limiters:
-                self.limiters[host] = RateLimiter(self.rate)
+                rate = min(self.rate, 1 / CRAWL_DELAYS[host]) if host in CRAWL_DELAYS else self.rate
+                self.limiters[host] = RateLimiter(rate)
             return self.limiters[host]
 
     def get(self, url: str) -> bytes:
@@ -527,6 +544,7 @@ _DATE_FORMATS = [
     (re.compile(r"\b\d{1,2}-[A-Za-z]{3}-\d{4}\b"), ("%d-%b-%Y",)),
     (re.compile(r"\b[A-Za-z]{3,9}\.? \d{1,2}, \d{4}\b"), ("%b %d, %Y", "%B %d, %Y")),
     (re.compile(r"\b\d{1,2} [A-Za-z]{3,9} \d{4}\b"), ("%d %b %Y", "%d %B %Y")),
+    (re.compile(r"\b\d{1,2}/\d{1,2}/\d{2}\b"), ("%m/%d/%y",)),
 ]
 
 
@@ -543,6 +561,14 @@ def parse_date(text: str) -> str:
     return ""
 
 
+def parse_maturity(text: str) -> str:
+    """A maturity date as YYYY-MM-DD. Pools of mortgages give a range ('11/01/2027-10/01/2056'),
+    which becomes an ISO 8601 interval: '2027-11-01/2056-10-01'."""
+    parts = re.split(r"(?<=\d)\s*-\s*(?=\d{1,2}/\d{1,2}/\d{4})", text)
+    dates = [parse_date(part) for part in parts]
+    return "/".join(dates) if all(dates) else text
+
+
 def find_as_of(text: str) -> str:
     """The date following 'as of' in text, as YYYY-MM-DD ('' if none)."""
     for match in re.finditer(r"as of", text, re.IGNORECASE):
@@ -555,11 +581,11 @@ def find_as_of(text: str) -> str:
 # Issuer column headers, normalized by _header_key, mapped to output fields.
 COLUMN_ALIASES = {
     "holding_name": ["name", "securityname", "security", "description", "securitydescription",
-                     "holding", "holdingname", "issuername", "issuer"],
-    "ticker": ["ticker", "symbol", "tickersymbol"],
+                     "holding", "holdingname", "issuername", "issuer", "company"],
+    "ticker": ["ticker", "symbol", "tickersymbol", "stockticker"],
     "cusip": ["cusip"],
     "isin": ["isin"],
-    "sedol": ["sedol"],
+    "sedol": ["sedol", "sedolnumber"],
     "other_id": ["identifier", "securityid"],
     # Not "type": iShares files with both put e.g. "EQUITY" in Type, "Equity" in Asset Class.
     "asset_class": ["assetclass", "securitytype", "assettype"],
@@ -567,18 +593,22 @@ COLUMN_ALIASES = {
     "country": ["location", "country", "countryofrisk", "locationofrisk"],
     "currency": ["currency", "localcurrency", "marketcurrency", "basecurrency"],
     "shares": ["shares", "sharesheld", "quantity", "sharesquantity", "parvalue", "par", "units",
-               "sharespar", "nominal", "principal"],
+               "sharespar", "nominal", "principal", "sharescontracts"],
     "price": ["price", "marketprice", "closingprice"],
     # First Trust's "Market Value / Notional Value" holds notional amounts for derivatives;
     # add_value_weights() moves those to notional_value.
-    "market_value": ["marketvalue", "marketvalueusd", "basemarketvalue", "value",
+    "market_value": ["marketvalue", "marketvalueusd", "marketvalueus", "basemarketvalue", "value",
                      "marketvaluenotionalvalue"],
-    "notional_value": ["notionalvalue"],
-    "weight_pct": ["weightpct", "weight", "weighting", "marketweight", "pctofnetassets",
-                   "percentofnetassets",
-                   "pctnetassets", "netassetspct", "portfolioweight", "pctoffund"],
+    # ProShares: "Exposure Value (Notional + GL)"
+    "notional_value": ["notionalvalue", "exposurevaluenotionalgl"],
+    "weight_pct": ["weightpct", "weight", "weighting", "weightings", "marketweight",
+                   "exposureweight", "pctofnetassets", "percentofnetassets",
+                   "pctnetassets", "netassetspct", "portfolioweight", "pctoffund",
+                   "holdingspercent"],
     "maturity_date": ["maturity", "maturitydate"],
     "coupon_rate": ["couponpct", "coupon", "couponrate"],
+    # Not an output column: files that repeat the holdings date on every row (see rows_to_holdings).
+    "as_of_date": ["date", "asofdate", "tradedate"],
 }
 _ALIAS_TO_FIELD = {alias: f for f, aliases in COLUMN_ALIASES.items() for alias in aliases}
 
@@ -610,7 +640,7 @@ def normalize_holding(raw: dict) -> dict:
     for name in HOLDING_FIELDS:
         value = raw.get(name)
         holding[name] = parse_number(value) if name in NUMERIC_FIELDS else clean_text(value)
-    holding["maturity_date"] = parse_date(holding["maturity_date"]) or holding["maturity_date"]
+    holding["maturity_date"] = parse_maturity(holding["maturity_date"])
     return holding
 
 
@@ -624,11 +654,15 @@ def rows_to_holdings(
     columns name a security and a weight, quantity or value; the table ends at
     the first row with fewer than two filled cells. ``overrides`` remaps
     ambiguous headers, e.g. SSGA's "Identifier" column holds CUSIPs.
+
+    Some files (ARK, Pacer, Innovator) have no preamble but a date column; its
+    first value is added to the preamble as "As of <date>".
     """
     overrides = overrides or {}
     preamble: list[str] = []
     mapping: dict[int, str] | None = None
     holdings = []
+    row_date = ""
     for row in rows:
         cells = [clean_text(c) for c in row]
         if mapping is None:
@@ -640,12 +674,20 @@ def rows_to_holdings(
             continue
         if sum(1 for c in cells if c) < 2:
             break
-        holdings.append(normalize_holding(
-            {name: cells[i] for i, name in mapping.items() if i < len(cells)}
-        ))
+        raw = {name: cells[i] for i, name in mapping.items() if i < len(cells)}
+        row_date = row_date or raw.get("as_of_date", "")
+        holdings.append(normalize_holding(raw))
     if mapping is None:
         raise NotAvailable("no holdings table found")
+    if row_date:
+        preamble.insert(0, f"As of {row_date}")
     return holdings, "\n".join(preamble)
+
+
+def html_table_rows(table) -> list[list[str]]:
+    """The text of each cell of a BeautifulSoup table, row by row."""
+    return [[cell.get_text(" ", strip=True) for cell in tr.find_all(["td", "th"])]
+            for tr in table.find_all("tr")]
 
 
 def add_value_weights(rows: list[dict]) -> str:
@@ -656,32 +698,42 @@ def add_value_weights(rows: list[dict]) -> str:
     21.6% of the fund. Short positions and written options have negative market
     values, so their weights are negative and the total is still 100% of net assets.
 
-    Some issuers put a derivative's notional amount in the market value column
-    (First Trust's "Market Value / Notional Value"). So each row is checked against
-    what its published weight allows, given the net assets implied by the larger
-    positions; rows that don't fit are notional amounts and move to notional_value.
-    The remaining market values must add up to those net assets. Returns why value
-    weights were not computed, or "" (also when a source has no market values).
+    Derivatives don't always fit: First Trust puts a future's notional amount in its
+    market value column ("Market Value / Notional Value"), and American Century
+    weights a future by its exposure while its market value is the day's gain or
+    loss. So each row is checked against what its published weight allows, given the
+    fund's net assets implied by the larger positions (leaving out those far from the
+    median, such as derivatives). A market value too large for its weight is a notional
+    amount and moves to notional_value; one too small is kept. The remaining market
+    values must add up to those net assets. Holdings with neither a market value nor a weight
+    (worthless warrants, say) are left out. Returns why value weights were not
+    computed, or "" (also when a source has no market values).
     """
-    if not any(isinstance(r["market_value"], float) for r in rows):
+    valued = [r for r in rows if isinstance(r["market_value"], float)]
+    if not valued:
         return ""
-    if not all(isinstance(r["market_value"], float) for r in rows):
+    if any(isinstance(r["weight_pct"], float) and r["weight_pct"] != 0
+           for r in rows if not isinstance(r["market_value"], float)):
         return "value weights not computed: some holdings have no market value"
-    weighted = [r for r in rows if isinstance(r["weight_pct"], float) and r["weight_pct"] != 0]
+    weighted = [r for r in valued if isinstance(r["weight_pct"], float) and r["weight_pct"] != 0]
     # Larger positions lose least to rounding; equal-weight funds have none, so use them all.
     sized = [r for r in weighted if abs(r["weight_pct"]) >= 0.25]
     if sum(r["weight_pct"] for r in sized) < 10:
         sized = weighted
-    published = sum(r["weight_pct"] for r in sized)
-    if published < 10:
+    if sum(r["weight_pct"] for r in sized) < 10:
         return "value weights not computed: too few published weights to check them against"
-    net_assets = sum(r["market_value"] for r in sized) / published * 100
-    notional = {id(r) for r in rows if not _fits_published_weight(r, net_assets)}
-    total = sum(r["market_value"] for r in rows if id(r) not in notional)
+    implied = {id(r): r["market_value"] / r["weight_pct"] * 100 for r in sized}
+    typical = statistics.median_low(implied.values())
+    # Derivatives weighted by exposure, or valued at their notional amount, are far off.
+    fitting = [r for r in sized if abs(implied[id(r)] / typical - 1) <= 0.1]
+    net_assets = (sum(r["market_value"] for r in fitting)
+                  / sum(r["weight_pct"] for r in fitting) * 100)
+    notional = {id(r) for r in valued if _holds_notional_amount(r, net_assets)}
+    total = sum(r["market_value"] for r in valued if id(r) not in notional)
     if abs(total / net_assets - 1) > 0.01:
         return (f"value weights not computed: market values add up to {total / net_assets:.1%} "
                 "of the net assets implied by the published weights")
-    for row in rows:
+    for row in valued:
         if id(row) in notional:
             row["notional_value"] = row["notional_value"] or row["market_value"]
             row["market_value"] = ""
@@ -690,12 +742,13 @@ def add_value_weights(rows: list[dict]) -> str:
     return ""
 
 
-def _fits_published_weight(row: dict, net_assets: float) -> bool:
+def _holds_notional_amount(row: dict, net_assets: float) -> bool:
+    """Is the market value far larger than the published weight allows?"""
     if not isinstance(row["weight_pct"], float):
-        return True
+        return False
     computed = row["market_value"] / net_assets * 100
     # Published weights are rounded to 0.01%; allow for that and for the estimate of net assets.
-    return abs(computed - row["weight_pct"]) <= max(0.01, 0.02 * abs(row["weight_pct"]))
+    return abs(computed) - abs(row["weight_pct"]) > max(0.01, 0.02 * abs(row["weight_pct"]))
 
 
 def read_csv_rows(data: bytes) -> list[list[str]]:
@@ -893,11 +946,9 @@ def parse_first_trust(page: str) -> tuple[str, list[dict]]:
     as_of = find_as_of(title.get_text(" ", strip=True)) if title else ""
     holdings = []
     for table in soup.select("table.fundSilverGrid"):
-        rows = [[cell.get_text(" ", strip=True) for cell in tr.find_all(["td", "th"])]
-                for tr in table.find_all("tr")]
         try:
             # Here "Identifier" is the exchange ticker; CUSIPs have their own column.
-            table_holdings, _ = rows_to_holdings(rows, {"identifier": "ticker"})
+            table_holdings, _ = rows_to_holdings(html_table_rows(table), {"identifier": "ticker"})
         except NotAvailable:
             continue  # e.g. a futures exposure summary table
         holdings.extend(table_holdings)
@@ -906,35 +957,64 @@ def parse_first_trust(page: str) -> tuple[str, list[dict]]:
     return as_of, holdings
 
 
-class GlobalXSource(Source):
-    name = "global_x"
-    HOLDINGS = "https://assets.globalxetfs.com/funds/holdings/{ticker}_full-holdings_{date:%Y%m%d}.csv"
+class DatedFileSource(Source):
+    """Holdings files named by date ({date} in HOLDINGS): the most recent one is used."""
+
+    HOLDINGS = ""
     LOOKBACK_BUSINESS_DAYS = 5
 
     def __init__(self, fetcher: Fetcher, today: dt.date | None = None):
         super().__init__(fetcher)
         self.today = today
 
-    def handles(self, etf: Etf) -> bool:
-        return etf.name.lower().startswith("global x")
+    def file_ticker(self, etf: Etf) -> str:
+        return etf.ticker
+
+    def parse(self, data: bytes) -> tuple[list[dict], str]:
+        return rows_to_holdings(read_csv_rows(data))
 
     def fetch(self, etf: Etf) -> Holdings:
-        # Files are named by date, so look for the most recent one.
         for day in recent_business_days(self.today or dt.date.today(), self.LOOKBACK_BUSINESS_DAYS):
-            url = self.HOLDINGS.format(ticker=etf.ticker.lower(), date=day)
+            url = self.HOLDINGS.format(ticker=self.file_ticker(etf), date=day)
             try:
-                holdings, preamble = self.download(
-                    url, lambda d: rows_to_holdings(read_csv_rows(d)))
+                holdings, preamble = self.download(url, self.parse)
             except NotFound:
                 continue
             except requests.HTTPError as exc:
-                # The file store answers 403 for a file that doesn't exist (yet).
+                # Some file stores answer 403 for a file that doesn't exist (yet).
                 if exc.response is not None and exc.response.status_code == 403:
                     continue
                 raise
             return Holdings(self.name, url, find_as_of(preamble) or day.isoformat(), holdings)
         raise NotAvailable(
             f"no holdings file in the last {self.LOOKBACK_BUSINESS_DAYS} business days")
+
+
+class GlobalXSource(DatedFileSource):
+    name = "global_x"
+    HOLDINGS = "https://assets.globalxetfs.com/funds/holdings/{ticker}_full-holdings_{date:%Y%m%d}.csv"
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.name.lower().startswith("global x")
+
+    def file_ticker(self, etf: Etf) -> str:
+        return etf.ticker.lower()
+
+
+class DimensionalSource(DatedFileSource):
+    name = "dimensional"
+    HOLDINGS = "https://tools-blob.dimensional.com/etf/{date:%Y%m%d}/{ticker}.csv"
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.name.lower().startswith("dimensional")
+
+    def parse(self, data: bytes) -> tuple[list[dict], str]:
+        # "identifier" holds CUSIPs, and weights are fractions: 0.0567 means 5.67%.
+        holdings, preamble = rows_to_holdings(read_csv_rows(data), {"identifier": "cusip"})
+        for holding in holdings:
+            if isinstance(holding["weight_pct"], float):
+                holding["weight_pct"] = round(holding["weight_pct"] * 100, 10)
+        return holdings, preamble
 
 
 def recent_business_days(today: dt.date, count: int) -> list[dt.date]:
@@ -944,6 +1024,418 @@ def recent_business_days(today: dt.date, count: int) -> list[dt.date]:
             days.append(day)
         day -= dt.timedelta(days=1)
     return days
+
+
+class CsvSource(Source):
+    """Holdings in a CSV file at a URL made from the ticker; funds are matched by name."""
+
+    HOLDINGS = ""
+    NAME: re.Pattern
+
+    def handles(self, etf: Etf) -> bool:
+        return bool(self.NAME.search(etf.name))
+
+    def fetch(self, etf: Etf) -> Holdings:
+        url = self.HOLDINGS.format(ticker=etf.ticker)
+        holdings, preamble = self.download(url, lambda d: rows_to_holdings(read_csv_rows(d)))
+        return Holdings(self.name, url, find_as_of(preamble), holdings)
+
+
+class PacerSource(CsvSource):
+    name = "pacer"
+    HOLDINGS = "https://www.paceretfs.com/products/holdings_download/{ticker}"
+    NAME = re.compile(r"^Pacer\b", re.IGNORECASE)
+
+
+class DirexionSource(CsvSource):
+    name = "direxion"
+    HOLDINGS = "https://www.direxion.com/holdings/{ticker}.csv"
+    NAME = re.compile(r"^Direxion\b", re.IGNORECASE)
+
+
+class InnovatorSource(Source):
+    """Innovator publishes one file with the holdings of all its funds."""
+
+    name = "innovator"
+    HOLDINGS = "https://www.innovatoretfs.com/etf/xt_holdings.csv"
+
+    def __init__(self, fetcher: Fetcher):
+        super().__init__(fetcher)
+        self.lock = threading.Lock()
+        self.funds: dict[str, list[list[str]]] | None = None
+        self.error = ""
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.name.lower().startswith("innovator")
+
+    def fetch(self, etf: Etf) -> Holdings:
+        rows = self._funds().get(etf.ticker)
+        if not rows:
+            raise NotAvailable("not in the holdings file")
+        holdings, preamble = rows_to_holdings(rows)
+        return Holdings(self.name, self.HOLDINGS, find_as_of(preamble), holdings)
+
+    def _funds(self) -> dict[str, list[list[str]]]:
+        """The file split by fund, downloaded once by whichever thread asks first."""
+        with self.lock:
+            if self.funds is None and not self.error:
+                try:
+                    self.funds = self.download(
+                        self.HOLDINGS, lambda d: split_by_fund(read_csv_rows(d), "account"))
+                except NotAvailable as exc:
+                    self.error = str(exc)
+                except Exception as exc:
+                    self.error = f"{type(exc).__name__}: {exc}"
+            if self.error:
+                raise NotAvailable(self.error)
+            return self.funds
+
+
+def split_by_fund(rows: list[list[str]], fund_column: str) -> dict[str, list[list[str]]]:
+    """{fund ticker: [header, *its rows]} from a file listing many funds' holdings."""
+    for start, row in enumerate(rows):
+        keys = [_header_key(cell) for cell in row]
+        if fund_column in keys:
+            column = keys.index(fund_column)
+            break
+    else:
+        raise NotAvailable(f"no {fund_column!r} column")
+    funds: dict[str, list[list[str]]] = {}
+    for row in rows[start + 1:]:
+        fund = row[column].strip().upper() if column < len(row) else ""
+        if fund:
+            funds.setdefault(fund, [rows[start]]).append(row)
+    return funds
+
+
+class VanguardSource(Source):
+    """Vanguard publishes holdings as of each month end, a few weeks after it."""
+
+    name = "vanguard"
+    HOLDINGS = ("https://investor.vanguard.com/vmf/api/{ticker}/portfolio-holding/{kind}"
+                "?start={start}&count={count}")
+    KINDS = ("stock", "bond")  # listed separately; a fund has none of one kind or the other
+    PAGE_SIZE = 3000
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.name.lower().startswith("vanguard")
+
+    def fetch(self, etf: Etf) -> Holdings:
+        source_url, as_of, holdings = "", "", []
+        for kind in self.KINDS:
+            start, total = 1, 1
+            while start <= total:
+                url = self.HOLDINGS.format(ticker=etf.ticker, kind=kind, start=start,
+                                           count=self.PAGE_SIZE)
+                total, page_as_of, rows = self.download(
+                    url, lambda d: parse_vanguard(json.loads(d), kind))
+                if not rows:
+                    break
+                source_url, as_of = source_url or url, as_of or page_as_of
+                holdings.extend(rows)
+                start += len(rows)
+        return Holdings(self.name, source_url, as_of, holdings)
+
+
+def parse_vanguard(data: dict, kind: str) -> tuple[int, str, list[dict]]:
+    """(holdings in total, as-of date, holdings on this page) from Vanguard's holdings API."""
+    holdings = []
+    for h in (data.get("fund") or {}).get("entity") or []:
+        holdings.append(normalize_holding({
+            "holding_name": h.get("longName") or h.get("shortName"),
+            "ticker": h.get("ticker"),
+            "cusip": h.get("cusip"),
+            "isin": h.get("isin"),
+            "sedol": h.get("sedol"),
+            "asset_class": kind.capitalize(),
+            # Bonds list their par value as faceAmount; sharesHeld is 0.
+            "shares": h.get("faceAmount") or h.get("sharesHeld"),
+            "market_value": h.get("marketValue"),
+            "notional_value": h.get("notionalValue") if parse_number(h.get("notionalValue"))
+            else "",
+            "weight_pct": h.get("percentWeight"),
+            "maturity_date": h.get("maturityDate"),
+            "coupon_rate": h.get("couponRate"),
+        }))
+    as_of = parse_date(str(data.get("asOfDate") or "").split("T")[0])  # 2026-08-31T00:00:00-04:00
+    return int(data.get("size") or 0), as_of, holdings
+
+
+class ProSharesSource(Source):
+    name = "proshares"
+    # Fund pages list every holding. Leveraged and inverse funds have their own path.
+    PAGES = ("https://www.proshares.com/our-etfs/leveraged-and-inverse/{ticker}",
+             "https://www.proshares.com/our-etfs/strategic/{ticker}")
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.name.lower().startswith("proshares")
+
+    def fetch(self, etf: Etf) -> Holdings:
+        for page in self.PAGES:
+            url = page.format(ticker=etf.ticker.lower())
+            try:
+                as_of, holdings = self.download(
+                    url, lambda d: parse_proshares(d.decode("utf-8", errors="replace")))
+            except NotFound:
+                continue
+            return Holdings(self.name, url, as_of, holdings)
+        raise NotAvailable("no fund page")
+
+
+def parse_proshares(page: str) -> tuple[str, list[dict]]:
+    """Holdings from a ProShares fund page. Swaps and futures have an exposure value
+    (notional_value) and a weight but no market value; their gains and losses are in
+    the "Net Other Assets" row."""
+    soup = BeautifulSoup(page, "html.parser")
+    table = soup.find("table", id="holdings")
+    if table is None:
+        raise NotAvailable("no holdings table found")
+    section = table.find_parent("section") or table
+    holdings, _ = rows_to_holdings(html_table_rows(table))
+    return find_as_of(section.get_text(" ", strip=True)), holdings
+
+
+class SchwabSource(Source):
+    name = "schwab"
+    HOLDINGS = "https://www.schwabassetmanagement.com/allholdings/{ticker}?page={page}"
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.name.lower().startswith("schwab")
+
+    def fetch(self, etf: Etf) -> Holdings:
+        as_of, holdings, page, total = "", [], 0, 1
+        while len(holdings) < total:  # 100 holdings per page
+            url = self.HOLDINGS.format(ticker=etf.ticker, page=page)
+            page_as_of, total, rows = self.download(
+                url, lambda d: parse_schwab(d.decode("utf-8", errors="replace")))
+            if not rows:
+                break
+            as_of = as_of or page_as_of
+            holdings.extend(rows)
+            page += 1
+        return Holdings(self.name, self.HOLDINGS.format(ticker=etf.ticker, page=0), as_of, holdings)
+
+
+def parse_schwab(page: str) -> tuple[str, int, list[dict]]:
+    """(as-of date, holdings in total, holdings on this page) from a Schwab all-holdings page.
+    Market values are left out: the page rounds them to a few digits ("$5.2B")."""
+    soup = BeautifulSoup(page, "html.parser")
+    table = soup.select_one("table.table-funds")
+    if table is None:
+        raise NotAvailable("no holdings table found")
+    holdings, _ = rows_to_holdings(html_table_rows(table),
+                                   {"fundname": "holding_name", "pctofassets": "weight_pct"})
+    for holding in holdings:
+        holding["market_value"] = ""
+    as_of = soup.select_one(".view__header--as-of-date")
+    shown = soup.select_one(".view__header--results")  # "Displaying 1 - 100 of 102"
+    total = re.search(r"\bof\s+([\d,]+)", shown.get_text(" ", strip=True)) if shown else None
+    return (find_as_of(as_of.get_text(" ", strip=True)) if as_of else "",
+            int(total.group(1).replace(",", "")) if total else len(holdings),
+            holdings)
+
+
+class VanEckSource(Source):
+    name = "vaneck"
+    # The path names the fund's asset class. With the wrong one, the site redirects to
+    # the fund's overview page, so bond funds try "income" first and the others "equity".
+    HOLDINGS = "https://www.vaneck.com/us/en/etf/{category}/{ticker}/holdings/download/xlsx/"
+    INCOME = re.compile(r"\b(Bond|Muni|Treasury|Yield|Income|Credit|Loan|CLO|Mortgage)\b",
+                        re.IGNORECASE)
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.name.lower().startswith("vaneck")
+
+    def fetch(self, etf: Etf) -> Holdings:
+        categories = ("income", "equity") if self.INCOME.search(etf.name) else ("equity", "income")
+        failures = []
+        for category in categories:
+            url = self.HOLDINGS.format(category=category, ticker=etf.ticker.lower())
+            try:
+                holdings, preamble = self.download(url, lambda d: rows_to_holdings(
+                    read_xlsx_rows(d), {"identifierfigi": "other_id"}))
+            except NotAvailable as exc:
+                failures.append(f"{category}: {exc}")
+                continue
+            # The workbook starts "Daily Holdings (%) 10/13/2026", without "as of".
+            return Holdings(self.name, url, find_as_of(preamble) or parse_date(preamble), holdings)
+        raise NotAvailable("; ".join(failures))
+
+
+class ArkSource(Source):
+    name = "ark"
+    FUND_PAGE = "https://www.ark-funds.com/funds/{ticker}"
+    NAME = re.compile(r"^ARK\b")  # not IGNORECASE: "Ark" could start other fund names
+
+    def handles(self, etf: Etf) -> bool:
+        return bool(self.NAME.search(etf.name))
+
+    def fetch(self, etf: Etf) -> Holdings:
+        # The holdings file is named after the fund ("ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv"),
+        # not always as the ETF list spells it, so take the link from the fund page.
+        page_url = self.FUND_PAGE.format(ticker=etf.ticker.lower())
+        url = self.download(page_url, lambda d: find_ark_csv(d.decode("utf-8", errors="replace")))
+        holdings, preamble = self.download(url, lambda d: rows_to_holdings(read_csv_rows(d)))
+        return Holdings(self.name, url, find_as_of(preamble), holdings)
+
+
+_ARK_CSV = re.compile(
+    r"https://assets\.ark-funds\.com/fund-documents/funds-etf-csv/[^\"'<>\s]+\.csv")
+
+
+def find_ark_csv(page: str) -> str:
+    match = _ARK_CSV.search(page)
+    if not match:
+        raise NotAvailable("fund page links no holdings file")
+    return html.unescape(match.group(0))
+
+
+class AmericanCenturySource(Source):
+    """American Century's sites show each ETF's holdings on a page addressed by an internal
+    fund number, which the fund list gives. Avantis is American Century's other brand."""
+
+    name = "american_century"
+    FUND_LIST = "https://www.americancentury.com/invest/funds/?type=ETF"
+    HOLDINGS = "https://www.americancentury.com/invest/funds/total-holdings/{number}/?type=etf"
+
+    def __init__(self, fetcher: Fetcher):
+        super().__init__(fetcher)
+        self.numbers: dict[str, str] = {}
+
+    def prepare(self) -> None:
+        try:
+            page = self.fetcher.get(self.FUND_LIST, max_age=REFERENCE_TTL)
+        except Exception as exc:
+            log.warning("%s fund list unavailable (%s); its ETFs will use the fallback source",
+                        self.name, exc)
+            return
+        self.numbers = parse_american_century_fund_list(page.decode("utf-8", errors="replace"))
+        log.info("%s: %d ETFs", self.name, len(self.numbers))
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.ticker in self.numbers
+
+    def fetch(self, etf: Etf) -> Holdings:
+        url = self.HOLDINGS.format(number=self.numbers[etf.ticker])
+        as_of, holdings = self.download(
+            url, lambda d: parse_american_century(d.decode("utf-8", errors="replace")))
+        return Holdings(self.name, url, as_of, holdings)
+
+
+class AvantisSource(AmericanCenturySource):
+    name = "avantis"
+    FUND_LIST = "https://www.avantisinvestors.com/avantis-investments/"
+    HOLDINGS = ("https://www.avantisinvestors.com/avantis-investments/total-holdings/{number}/"
+                "?type=etf")
+
+
+# The pages are rendered from JavaScript object literals embedded in them, such as
+# {ticker:"AVUS",productName:"Avantis U.S. Equity ETF",fundNumber:"114",productType:"ETF",...}
+_JS_FIELD = re.compile(r'[{,](\w+):(?:"((?:[^"\\]|\\.)*)"|null)')
+
+
+def _js_fields(text: str) -> dict[str, str]:
+    """The string fields of the object literal text starts with (the first of each name)."""
+    fields: dict[str, str] = {}
+    for key, value in _JS_FIELD.findall(text):
+        try:
+            fields.setdefault(key, json.loads(f'"{value}"'))
+        except ValueError:
+            fields.setdefault(key, value)
+    return fields
+
+
+def parse_american_century_fund_list(page: str) -> dict[str, str]:
+    """{ETF ticker: fund number} from an American Century or Avantis fund list page."""
+    numbers = {}
+    for match in re.finditer(r'\{ticker:"', page):
+        fund = _js_fields(page[match.start():match.start() + 500])
+        if fund.get("productType") == "ETF" and fund.get("fundNumber"):
+            numbers[fund["ticker"].upper()] = fund["fundNumber"]
+    return numbers
+
+
+def js_array_items(text: str, start: int) -> list[str]:
+    """The {...} items of the JavaScript array literal that starts at text[start] ("[")."""
+    items, depth, item_start, in_string, i = [], 0, 0, False, start
+    while i < len(text):
+        char = text[i]
+        if in_string:
+            if char == "\\":
+                i += 1
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if char == "{" and depth == 2:
+                item_start = i
+        elif char in "]}":
+            depth -= 1
+            if char == "}" and depth == 1:
+                items.append(text[item_start:i + 1])
+            if depth == 0:
+                return items
+        i += 1
+    raise NotAvailable("holdings list is cut off")
+
+
+def parse_american_century(page: str) -> tuple[str, list[dict]]:
+    """(as-of date, holdings) from an American Century or Avantis total-holdings page."""
+    start = page.find("etfHoldings:[")
+    if start < 0:
+        raise NotAvailable("no holdings on page")
+    holdings = []
+    for item in js_array_items(page, start + len("etfHoldings:")):
+        h = _js_fields(item)
+        holdings.append(normalize_holding({
+            "holding_name": h.get("name"),
+            "ticker": h.get("ticker"),
+            "cusip": h.get("cusip"),
+            "isin": h.get("isin"),
+            "sedol": h.get("sedol"),
+            "asset_class": h.get("securityType"),
+            "sector": h.get("sector"),
+            "country": h.get("country"),
+            "shares": h.get("shareQuantity"),
+            "market_value": h.get("baseMarketValue"),
+            "weight_pct": h.get("weight"),
+            "maturity_date": h.get("maturityDate"),
+            "coupon_rate": h.get("coupon"),
+        }))
+    as_of = re.search(r'etfHoldingsAsOfDate:"([^"]*)"', page)
+    return parse_date(as_of.group(1)) if as_of else "", holdings
+
+
+class FidelitySource(Source):
+    """Fidelity's research site lists each ETF's holdings as of a month end, with weights
+    only: the last month end for most funds, the one before for its active equity ETFs."""
+
+    name = "fidelity"
+    HOLDINGS = ("https://research2.fidelity.com/fidelity/screeners/etf/etfholdings.asp"
+                "?symbol={ticker}&view=Holdings")
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.name.lower().startswith("fidelity")
+
+    def fetch(self, etf: Etf) -> Holdings:
+        url = self.HOLDINGS.format(ticker=etf.ticker)
+        as_of, holdings = self.download(
+            url, lambda d: parse_fidelity(d.decode("utf-8", errors="replace")))
+        return Holdings(self.name, url, as_of, holdings)
+
+
+def parse_fidelity(page: str) -> tuple[str, list[dict]]:
+    """(as-of date, holdings) from a Fidelity research holdings page. A fund it has no
+    holdings for gets one row saying so, which ends the table: no holdings."""
+    soup = BeautifulSoup(page, "html.parser")
+    table = soup.select_one("table.results-table")
+    if table is None:
+        raise NotAvailable("no holdings table found")
+    holdings, _ = rows_to_holdings(html_table_rows(table))
+    header = soup.select_one(".num-results")  # "Basket Holdings: 298 AS OF 09/30/2026"
+    return find_as_of(header.get_text(" ", strip=True)) if header else "", holdings
 
 
 class ZacksSource(Source):
@@ -1001,6 +1493,18 @@ ISSUER_SOURCES: dict[str, type[Source]] = {
     "invesco": InvescoSource,
     "first_trust": FirstTrustSource,
     "global_x": GlobalXSource,
+    "vanguard": VanguardSource,
+    "proshares": ProSharesSource,
+    "innovator": InnovatorSource,
+    "pacer": PacerSource,
+    "schwab": SchwabSource,
+    "vaneck": VanEckSource,
+    "ark": ArkSource,
+    "direxion": DirexionSource,
+    "dimensional": DimensionalSource,
+    "avantis": AvantisSource,
+    "american_century": AmericanCenturySource,
+    "fidelity": FidelitySource,
 }
 
 
