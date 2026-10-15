@@ -18,7 +18,18 @@
    | `invesco`     | names starting with "Invesco"        | JSON API, keyed by the CUSIP on each fund's page | In response |
    | `first_trust` | names starting with "First Trust" or "FT Vest" | HTML page | On page        |
    | `global_x`    | names starting with "Global X"       | CSV, named by date  | In file name    |
+   | `vanguard`    | names starting with "Vanguard"       | JSON API, paged     | In response (**month end**) |
+   | `proshares`   | names starting with "ProShares"      | HTML fund page      | On page         |
+   | `innovator`   | names starting with "Innovator"      | One CSV for all Innovator funds | In file |
+   | `pacer`       | names starting with "Pacer"          | CSV                 | In file         |
+   | `schwab`      | names starting with "Schwab"         | HTML pages, 100 holdings each | On page |
+   | `vaneck`      | names starting with "VanEck"         | Excel workbook      | In file         |
+   | `ark`         | names starting with "ARK"            | CSV, linked from the fund page | In file |
+   | `direxion`    | names starting with "Direxion"       | CSV                 | In file, if given |
    | `zacks`       | everything else, and the fallback when an issuer source fails | Web page, loaded in headless Chrome | **Not published** |
+
+   Together the issuer sources cover about 2,100 of the 5,800 ETFs, including
+   most of the largest.
 
    When a source has no file for a fund, errors out, or returns no rows, the
    next source is tried. The summary file records which source was used and why
@@ -46,8 +57,13 @@ python etf_holdings_scraper.py --limit 100             # first 100 tickers, alph
 python etf_holdings_scraper.py --sources ishares ssga --no-fallback   # issuer data only
 ```
 
-A full run makes about one request per ETF (two or three for a few Global X
-funds), at most `--rate` requests per second to each website (default 2).
+A full run makes about one request per ETF, at most `--rate` requests per
+second to each website (default 2). Some sources need a few more: Vanguard
+asks for stocks and bonds separately, Schwab shows 100 holdings per page, ARK
+reads the fund page to find the file, and ProShares and VanEck may try a second
+address. Innovator needs a single download for all its funds. VanEck's
+robots.txt asks for 25 seconds between requests, which the script honors, so
+its 90 funds take about 40 minutes in the background of a full run.
 Zacks serves most ETFs, and its pages take a few seconds each in a browser, so
 expect a full run to take roughly an hour.
 Downloads are cached in `.cache/` for six hours, so an interrupted run restarts
@@ -58,7 +74,7 @@ the summary for the ETFs finished so far.
 |---|---|---|
 | `--tickers` | all ETFs | Space or comma separated |
 | `--limit N` | | Only the first N ETFs |
-| `--sources` | all issuer sources | Any of `ishares ssga invesco first_trust global_x` |
+| `--sources` | all issuer sources | Any of `ishares ssga invesco first_trust global_x vanguard proshares innovator pacer schwab vaneck ark direxion` |
 | `--no-fallback` | | Don't use Zacks (no browser needed) |
 | `--browser` | `chrome` | `chrome` (installed Google Chrome), `chromium` (after `playwright install chromium`), or a path to a browser |
 | `--browser-workers` | 4 | Browsers loading Zacks pages in parallel |
@@ -110,11 +126,14 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   positions. iShares rounds to 0.01%: 10,837 of AGG's 13,418 bonds show 0.00%,
   though together they are 21.6% of the fund, so its weights add up to 81.88%.
   `value_weight_pct` fixes this by dividing each market value by the fund's total.
-  It is filled where the source publishes market values: iShares and First
-  Trust (both checked), and Global X if its files include them. State Street
-  and Invesco publish no market values but already give weights to six
-  decimals. Zacks rounds to 0.01% (AGG adds up to 192% there) and publishes no
-  market values, so its rows can't be corrected.
+  It is filled where the source publishes market values: iShares, First
+  Trust and Innovator (all checked; for Innovator, every one of its 179
+  funds), and Vanguard, ProShares, Pacer, VanEck, ARK, Direxion and Global X
+  when their files include them. State Street and Invesco publish no market
+  values but already give weights to six decimals. Schwab rounds its market
+  values to a few digits ("$5.2B"), so they are left blank. Zacks rounds to
+  0.01% (AGG adds up to 192% there) and publishes no market values, so its
+  rows can't be corrected.
 - **How `value_weight_pct` treats shorts and derivatives.** Short positions and
   written options have negative market values, so they get negative weights and
   each fund still adds up to 100% of net assets. An option's weight is the value
@@ -128,6 +147,21 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   `value_weight_pct` is left blank for that fund and the summary's `detail`
   column says why. Checked against AGG, IVV, IVVW, FPE and FTLS: every computed
   weight is within 0.005 of the published one, the most rounding can hide.
+- **Vanguard publishes month-end holdings**, a few weeks after the month ends:
+  on 2026-10-15 its newest were as of 2026-08-31. That is dated and complete
+  (with CUSIP, ISIN, SEDOL and market values), but can be older than Zacks. To
+  use Zacks for Vanguard funds instead, leave `vanguard` out of `--sources`.
+  Bonds come with their par value in `shares`; pools of mortgages give a range
+  of maturities, written as `2027-11-01/2056-10-01`.
+- **Leveraged and inverse funds list their exposure.** ProShares gives swaps
+  and futures an exposure weight and an exposure value (`notional_value`) but
+  no market value; their gains and losses are in the "Net Other Assets" row.
+  Weights of a 3x fund such as TQQQ add up to about 300%, and
+  `value_weight_pct` is left blank for those funds.
+- **The Direxion parser has not been checked against a live file.** Direxion's
+  site blocked the tool used to capture the samples, so its test sample uses
+  the columns of an older copy of SOXL's file. If the format has changed,
+  Direxion funds fall back to Zacks and the summary's `detail` column says why.
 - **Sectors are filled in from iShares.** Zacks publishes no sectors and State
   Street leaves them as "-", which left SPY, VOO, VTI and most other common ETFs
   without any. After a run, blank sectors are filled in from how iShares
@@ -158,9 +192,18 @@ Subclass `Source` with `handles(etf)` (does this source cover the ETF?) and
 `fetch(etf)` (return a `Holdings`), then add it to `ISSUER_SOURCES`. For CSV,
 Excel or HTML tables, `rows_to_holdings()` finds the header row and maps common
 column names (Name, Ticker, CUSIP, Weight (%), Shares Held, Market Value...)
-to the output columns, so most sources only need a URL and a reader. Good
-candidates by fund count: Vanguard, ProShares, Direxion, Schwab, JPMorgan,
-Fidelity, VanEck, WisdomTree and Innovator.
+to the output columns, so most sources only need a URL and a reader. An issuer
+with one CSV per fund at an address made from the ticker needs only a
+`CsvSource` subclass with a URL and a name pattern, like `PacerSource`.
+Pacer's and Innovator's files share one layout (Date, Account, StockTicker,
+CUSIP, SecurityName, Shares, Price, MarketValue, Weightings, NetAssets...),
+from their fund administrator, U.S. Bank; other funds it administers may
+publish the same columns, which are already mapped. Remaining issuers by fund
+count: Corgi, Leverage Shares, GraniteShares, Defiance, Fidelity, Tradr,
+JPMorgan, PGIM, Franklin and WisdomTree. Of those checked so far, Defiance's
+site blocked the tool used to capture samples, WisdomTree's holdings files
+are addressed by document IDs rather than tickers, and JPMorgan's fund pages
+load their data with JavaScript.
 
 ## Tests
 
@@ -174,5 +217,8 @@ pytest
 the one named in `ETF_TEST_BROWSER`) against a local stand-in for Zacks,
 including a bot check that clears itself; it is skipped if no browser starts.
 The other tests run offline against sample responses in `tests/fixtures/`, trimmed
-from real downloads, except the Global X holdings file: that site blocked the
-tool used to capture the others, so its sample is representative.
+from real downloads (a few counts edited to match the trimmed rows, as the
+tests note), except the Global X and Direxion holdings files: those sites
+blocked the tool used to capture the others, so their samples are
+representative. The VanEck workbook is rebuilt in the test from rows of a real
+download.

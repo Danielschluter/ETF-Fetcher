@@ -105,10 +105,22 @@ def test_parse_number(raw, expected):
     ('Fund Holdings as of Oct 09, 2026', "2026-10-09"),
     ("as of September 30, 2026", "2026-09-30"),
     ("Inception Date May 15, 2000\nFund Holdings as of 2026-10-09", "2026-10-09"),
+    ("As of 10/13/26", "2026-10-13"),
     ("no date here", ""),
 ])
 def test_find_as_of(text, expected):
     assert s.find_as_of(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("01/31/2028", "2028-01-31"),
+    ("11/01/2027-10/01/2056", "2027-11-01/2056-10-01"),  # a pool of mortgages
+    ("2027-11-01", "2027-11-01"),
+    ("Perpetual", "Perpetual"),
+    ("", ""),
+])
+def test_parse_maturity(text, expected):
+    assert s.parse_maturity(text) == expected
 
 
 def test_rows_to_holdings_finds_header_and_stops_at_footer():
@@ -133,6 +145,23 @@ def test_rows_to_holdings_without_table_is_not_available():
         s.rows_to_holdings([["Fund Name:", "Example"], ["nothing", "here"]])
 
 
+def test_rows_to_holdings_reads_the_date_column_as_the_as_of_date():
+    rows = [["Date", "Ticker", "Weight"], ["10/14/2026", "AAA", "60"], ["10/14/2026", "BBB", "40"]]
+    holdings, preamble = s.rows_to_holdings(rows)
+    assert s.find_as_of(preamble) == "2026-10-14"
+    assert [h["ticker"] for h in holdings] == ["AAA", "BBB"]
+
+
+def test_split_by_fund():
+    rows = [["Date", "Account", "StockTicker", "Weightings"],
+            ["10/15/2026", "AAA", "X", "60%"], ["10/15/2026", "BBB", "Y", "100%"],
+            ["10/15/2026", "aaa", "Z", "40%"]]
+    funds = s.split_by_fund(rows, "account")
+    assert funds == {"AAA": [rows[0], rows[1], rows[3]], "BBB": [rows[0], rows[2]]}
+    with pytest.raises(s.NotAvailable):
+        s.split_by_fund(rows, "fund")
+
+
 def test_recent_business_days_skips_weekends():
     sunday = dt.date(2026, 10, 11)
     assert s.recent_business_days(sunday, 3) == [
@@ -145,6 +174,12 @@ def test_rate_limiter_spaces_requests():
     for _ in range(5):
         limiter.wait()
     assert time.monotonic() - start >= 4 / 20 * 0.9
+
+
+def test_sites_asking_for_a_crawl_delay_get_it():
+    client = s.HttpClient("test", rate=2)
+    assert client._limiter("www.vaneck.com").interval == 25
+    assert client._limiter("www.ishares.com").interval == 0.5
 
 
 # ------------------------------------------------------------------------ http
@@ -421,6 +456,249 @@ def test_describe_response_without_html_title():
 def test_zacks_parser_without_holdings():
     with pytest.raises(s.NotAvailable):
         s.parse_zacks("<html>no data</html>")
+
+
+VANGUARD_URL = "https://investor.vanguard.com/vmf/api/{}/portfolio-holding/{}?start={}&count={}"
+# What the API answers for a kind of holding the fund doesn't have.
+VANGUARD_NONE = (b'{"size":0,"asOfDate":"2026-08-31T00:00:00-04:00","self":{"type":'
+                 b'"application/xml,application/json","href":"http://api.vanguard.com/rs/ire/01/'
+                 b'ind/fund/VOO/portfolio-holding/bond?start=1&count=2","ref":"self"},"fund":{}}')
+
+
+def test_vanguard_source_pages_through_holdings():
+    # The VOO pages are real responses trimmed to 2 + 1 holdings, with "size" set to match.
+    fetcher = FakeFetcher({
+        VANGUARD_URL.format("VOO", "stock", 1, 2): fixture("vanguard_voo_stock_1.json"),
+        VANGUARD_URL.format("VOO", "stock", 3, 2): fixture("vanguard_voo_stock_2.json"),
+        VANGUARD_URL.format("VOO", "bond", 1, 2): VANGUARD_NONE,
+    })
+    source = s.VanguardSource(fetcher)
+    source.PAGE_SIZE = 2
+    assert source.handles(VOO) and not source.handles(SPY)
+    result = source.fetch(VOO)
+    assert len(fetcher.requested) == 3
+    assert result.url == VANGUARD_URL.format("VOO", "stock", 1, 2)
+    assert result.as_of == "2026-08-31"
+    assert [h["ticker"] for h in result.rows] == ["NVDA", "AAPL", "BF.B"]
+    nvda = result.rows[0]
+    assert nvda["holding_name"] == "NVIDIA Corp."
+    assert (nvda["cusip"], nvda["isin"], nvda["sedol"]) == ("67066G104", "US67066G1040", "2379504")
+    assert (nvda["shares"], nvda["market_value"], nvda["weight_pct"]) == (
+        643435730.0, 142057740469.4, 8.08)
+    assert nvda["asset_class"] == "Stock" and nvda["notional_value"] == ""
+
+
+def test_vanguard_source_reads_bonds():
+    bnd = s.Etf("BND", "Vanguard Total Bond Market ETF", "Nasdaq")
+    fetcher = FakeFetcher({
+        VANGUARD_URL.format("BND", "stock", 1, 3000): VANGUARD_NONE,
+        VANGUARD_URL.format("BND", "bond", 1, 3000): fixture("vanguard_bnd_bond.json"),
+    })
+    result = s.VanguardSource(fetcher).fetch(bnd)
+    assert result.url == VANGUARD_URL.format("BND", "bond", 1, 3000)
+    pool, note = result.rows
+    assert pool["holding_name"] == "Federal National Mortgage Assn."
+    assert pool["maturity_date"] == "2027-11-01/2056-10-01"
+    assert (pool["shares"], pool["coupon_rate"], pool["asset_class"]) == (6743672547.0, 2.0, "Bond")
+    assert (note["cusip"], note["maturity_date"], note["weight_pct"]) == (
+        "91282CGH8", "2028-01-31", 0.48)
+
+
+PROSHARES_PAGE = "https://www.proshares.com/our-etfs/{}/{}"
+TQQQ = s.Etf("TQQQ", "ProShares UltraPro QQQ", "Nasdaq")
+
+
+def test_proshares_source():
+    url = PROSHARES_PAGE.format("leveraged-and-inverse", "tqqq")
+    source = s.ProSharesSource(FakeFetcher({url: fixture("proshares_tqqq.html")}))
+    assert source.handles(TQQQ) and not source.handles(QQQ)
+    result = source.fetch(TQQQ)
+    assert result.url == url
+    assert result.as_of == "2026-10-13"  # not the month-end date above the holdings
+    assert [h["holding_name"] for h in result.rows] == [
+        "NVIDIA CORP", "APPLE INC", "NASDAQ 100 INDEX SWAP BANK OF AMERICA NA",
+        "NASDAQ 100 E-MINI EQUITY INDEX 18/DEC/2026 NQZ6 INDEX",
+        "PROSHARES GENIUS MONEY MARKET ETF", "TREASURY BILL", "NET OTHER ASSETS (LIABILITIES)"]
+    nvda, swap = result.rows[0], result.rows[2]
+    assert (nvda["ticker"], nvda["sedol"], nvda["weight_pct"]) == ("NVDA", "2379504", 2.86)
+    assert (nvda["market_value"], nvda["shares"]) == (1094849832.0, 4791046.0)
+    assert (swap["ticker"], swap["weight_pct"], swap["notional_value"], swap["market_value"]) == (
+        "", 32.54, 12465194582.0, "")
+
+
+def test_proshares_source_tries_the_other_fund_page_path():
+    onln = s.Etf("ONLN", "ProShares Online Retail ETF", "NYSE Arca")
+    fetcher = FakeFetcher(
+        {PROSHARES_PAGE.format("strategic", "onln"): fixture("proshares_tqqq.html")})
+    result = s.ProSharesSource(fetcher).fetch(onln)
+    assert fetcher.requested == [PROSHARES_PAGE.format("leveraged-and-inverse", "onln"),
+                                 PROSHARES_PAGE.format("strategic", "onln")]
+    assert result.url == PROSHARES_PAGE.format("strategic", "onln")
+    with pytest.raises(s.NotAvailable, match="no fund page"):
+        s.ProSharesSource(FakeFetcher({})).fetch(onln)
+
+
+AAPR = s.Etf("AAPR", "Innovator Equity Defined Protection ETF - 2 Yr to April 2028", "Cboe BZX")
+ZSEP = s.Etf("ZSEP", "Innovator Equity Defined Protection ETF - 1 Yr September", "Cboe BZX")
+
+
+def test_innovator_source_reads_one_file_for_all_funds():
+    fetcher = FakeFetcher({s.InnovatorSource.HOLDINGS: fixture("innovator_xt_holdings.csv")})
+    source = s.InnovatorSource(fetcher)
+    assert source.handles(AAPR) and not source.handles(SPY)
+    result = source.fetch(AAPR)
+    assert len(source.fetch(ZSEP).rows) == 7
+    assert fetcher.requested == [s.InnovatorSource.HOLDINGS]
+    assert result.as_of == "2026-10-15"
+    assert len(result.rows) == 7
+    voo = next(r for r in result.rows if r["ticker"] == "VOO")
+    assert (voo["cusip"], voo["holding_name"], voo["shares"], voo["price"]) == (
+        "922908363", "Vanguard S&P 500 ETF", 110921.0, 707.43)
+    assert (voo["market_value"], voo["weight_pct"]) == (78468843.03, 110.45)
+    written_call = result.rows[1]
+    assert (written_call["shares"], written_call["weight_pct"]) == (-1158.0, -15.27)
+    assert s.add_value_weights(result.rows) == ""
+    assert voo["value_weight_pct"] == pytest.approx(110.45, abs=0.005)
+    with pytest.raises(s.NotAvailable, match="not in the holdings file"):
+        source.fetch(s.Etf("NEWX", "Innovator New ETF", ""))
+
+
+def test_innovator_source_downloads_a_failing_file_once():
+    fetcher = FakeFetcher({s.InnovatorSource.HOLDINGS: http_error(500)})
+    source = s.InnovatorSource(fetcher)
+    for etf in (AAPR, ZSEP):
+        with pytest.raises(s.NotAvailable, match="HTTP 500"):
+            source.fetch(etf)
+    assert fetcher.requested == [s.InnovatorSource.HOLDINGS]
+
+
+def test_pacer_source():
+    cowz = s.Etf("COWZ", "Pacer US Cash Cows 100 ETF", "Cboe BZX")
+    url = "https://www.paceretfs.com/products/holdings_download/COWZ"
+    source = s.PacerSource(FakeFetcher({url: fixture("pacer_cowz_holdings.csv")}))
+    assert source.handles(cowz) and not source.handles(SPY)
+    result = source.fetch(cowz)
+    assert result.as_of == "2026-10-14"
+    assert [h["ticker"] for h in result.rows] == ["ABNB", "ACN", "MPC", "USBFS03", "Cash&Other"]
+    acn = result.rows[1]
+    assert (acn["holding_name"], acn["cusip"], acn["shares"], acn["price"]) == (
+        "Accenture PLC", "G1151C101", 2107313.0, 213.56)
+    assert (acn["market_value"], acn["weight_pct"]) == (450037764.28, 2.35)
+
+
+SCHWAB_URL = "https://www.schwabassetmanagement.com/allholdings/SCHD?page={}"
+
+
+def test_schwab_source_reads_every_page():
+    # Real pages trimmed to two holdings each, with "Displaying 1 - 2 of 4" set to match.
+    schd = s.Etf("SCHD", "Schwab U.S. Dividend Equity ETF", "NYSE Arca")
+    fetcher = FakeFetcher({SCHWAB_URL.format(0): fixture("schwab_schd_page0.html"),
+                           SCHWAB_URL.format(1): fixture("schwab_schd_page1.html")})
+    source = s.SchwabSource(fetcher)
+    assert source.handles(schd) and not source.handles(SPY)
+    result = source.fetch(schd)
+    assert fetcher.requested == [SCHWAB_URL.format(0), SCHWAB_URL.format(1)]
+    assert result.as_of == "2026-10-13"
+    assert [h["ticker"] for h in result.rows] == ["TXN", "QCOM", "FAZ6", "DMZ6"]
+    txn = result.rows[0]
+    assert (txn["holding_name"], txn["cusip"], txn["shares"], txn["weight_pct"]) == (
+        "TEXAS INSTRUMENT INC", "882508104", 18224064.0, 4.71)
+    assert txn["market_value"] == ""  # shown as "$5.2B"
+    assert result.rows[2]["holding_name"] == "S&P MID 400 EMINI DEC 26"
+
+
+def vaneck_workbook() -> bytes:
+    """Rows as found in VanEck's SMH holdings workbook (holdings trimmed)."""
+    rows = [
+        ["Daily Holdings (%)  10/13/2026"],
+        [None] * 9,
+        ["Number", "Ticker", "Holding Name", "Identifier (FIGI)", "Shares", "Asset Class",
+         "Market Value (US$)", "Notional Value", "% of Net Assets"],
+        [1, "NVDA", "Nvidia Corp", "BBG000BBJQV0", "62,977,808", "Stock", "$14,391,688,684.16",
+         "--", "20.04%"],
+        [2, "TSM", "Taiwan Semiconductor Manufacturing Co L", "BBG000BD8ZK0", "15,048,413", "Stock",
+         "$6,698,349,594.56", "--", "9.33%"],
+        [26, "-USD CASH-", None, None, "42,568,818", "Cash Bal", "$42,568,817.82", "--", "0.06%"],
+        [27, "--", "Other/Cash", "--", "--", "Cash", "$-6,814,694.57", "--", "-0.01%"],
+        ["These are not recommendations to buy or to sell any security. Securities and holdings "
+         "may vary."],
+    ]
+    workbook = Workbook()
+    for row in rows:
+        workbook.active.append(row)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+VANECK_URL = "https://www.vaneck.com/us/en/etf/{}/{}/holdings/download/xlsx/"
+SMH = s.Etf("SMH", "VanEck Semiconductor ETF", "Nasdaq")
+
+
+def test_vaneck_source():
+    source = s.VanEckSource(FakeFetcher({VANECK_URL.format("equity", "smh"): vaneck_workbook()}))
+    assert source.handles(SMH) and not source.handles(SPY)
+    result = source.fetch(SMH)
+    assert result.as_of == "2026-10-13"
+    assert [h["ticker"] for h in result.rows] == ["NVDA", "TSM", "-USD CASH-", ""]
+    nvda = result.rows[0]
+    assert (nvda["holding_name"], nvda["other_id"], nvda["asset_class"]) == (
+        "Nvidia Corp", "BBG000BBJQV0", "Stock")
+    assert (nvda["shares"], nvda["market_value"], nvda["weight_pct"]) == (
+        62977808.0, 14391688684.16, 20.04)
+    assert result.rows[3]["market_value"] == -6814694.57
+
+
+def test_vaneck_source_tries_the_other_asset_class():
+    # With the wrong asset class in the path, the site redirects to the fund's overview page.
+    overview = b"<html><head><title>SMH - VanEck Semiconductor ETF</title></head></html>"
+    fetcher = FakeFetcher({VANECK_URL.format("equity", "smh"): overview,
+                           VANECK_URL.format("income", "smh"): vaneck_workbook()})
+    result = s.VanEckSource(fetcher).fetch(SMH)
+    assert result.url == VANECK_URL.format("income", "smh")
+    angl = s.Etf("ANGL", "VanEck Fallen Angel High Yield Bond ETF", "Nasdaq")
+    fetcher = FakeFetcher({})
+    with pytest.raises(s.NotAvailable, match="^income: HTTP 404; equity: HTTP 404$"):
+        s.VanEckSource(fetcher).fetch(angl)
+
+
+ARKK = s.Etf("ARKK", "ARK Innovation ETF", "NYSE Arca")
+ARKK_CSV = ("https://assets.ark-funds.com/fund-documents/funds-etf-csv/"
+            "ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv")
+
+
+def test_ark_source_follows_the_fund_page_link():
+    source = s.ArkSource(FakeFetcher({
+        "https://www.ark-funds.com/funds/arkk": fixture("ark_arkk_page.html"),
+        ARKK_CSV: fixture("ark_arkk_holdings.csv"),
+    }))
+    assert source.handles(ARKK) and not source.handles(SPY)
+    result = source.fetch(ARKK)
+    assert result.url == ARKK_CSV and result.as_of == "2026-10-14"
+    assert [h["ticker"] for h in result.rows] == ["TSLA", "SPCX", "", "RKLB UQ", ""]
+    tsla = result.rows[0]
+    assert (tsla["holding_name"], tsla["cusip"], tsla["shares"]) == (
+        "TESLA INC", "88160R101", 1716830.0)
+    assert (tsla["market_value"], tsla["weight_pct"]) == (644206120.9, 9.83)
+    assert result.rows[2]["cusip"] == "PPOPENAIC"
+
+
+def test_ark_fund_page_without_holdings_link():
+    with pytest.raises(s.NotAvailable, match="links no holdings file"):
+        s.find_ark_csv("<html><body>No holdings here</body></html>")
+
+
+def test_direxion_source():
+    # Representative: columns as in a copy of SOXL's file; Direxion's site blocked the capture tool.
+    soxl = s.Etf("SOXL", "Direxion Daily Semiconductor Bull 3X Shares", "NYSE Arca")
+    url = "https://www.direxion.com/holdings/SOXL.csv"
+    source = s.DirexionSource(FakeFetcher({url: fixture("direxion_soxl_holdings.csv")}))
+    assert source.handles(soxl) and not source.handles(SPY)
+    result = source.fetch(soxl)
+    assert [h["ticker"] for h in result.rows] == ["NVDA", "AVGO", "NXPI"]  # not AccountTicker
+    nvda = result.rows[0]
+    assert (nvda["holding_name"], nvda["cusip"], nvda["shares"], nvda["weight_pct"]) == (
+        "NVIDIA CORP", "67066G104", 661671.0, 6.32)
 
 
 # --------------------------------------------------------------- value weights
