@@ -406,7 +406,7 @@ class BrowserPool:
             with sync_playwright() as playwright:
                 try:
                     browser = playwright.chromium.launch(**self._launch_options())
-                    page = browser.new_page()
+                    page = self._new_page(browser)
                 except Exception as exc:
                     failure.append(exc)
                     return
@@ -420,6 +420,15 @@ class BrowserPool:
                 ready.set()
             log.debug("Browser worker stopped", exc_info=True)
 
+    @staticmethod
+    def _new_page(browser):
+        """A page that says it is Chrome: headless Chrome's user agent says "HeadlessChrome",
+        which some websites (Schwab's, for one) refuse."""
+        probe = browser.new_page()
+        user_agent = probe.evaluate("navigator.userAgent")
+        probe.close()
+        return browser.new_page(user_agent=user_agent.replace("HeadlessChrome", "Chrome"))
+
     def _serve(self, browser, page) -> None:
         while (job := self.jobs.get()) is not None:
             url, future = job
@@ -428,7 +437,7 @@ class BrowserPool:
             try:
                 self._check_given_up(url)
                 if page.is_closed():
-                    page = browser.new_page()
+                    page = self._new_page(browser)
                 future.set_result(self._load(page, url))
             except Exception as exc:
                 future.set_exception(exc)
@@ -1312,6 +1321,7 @@ class VanEckSource(Source):
 class ArkSource(Source):
     name = "ark"
     FUND_PAGE = "https://www.ark-funds.com/funds/{ticker}"
+    DOCUMENTS = "https://www.ark-funds.com/api/fund/document-table/{fund_id}"
     NAME = re.compile(r"^ARK\b")  # not IGNORECASE: "Ark" could start other fund names
 
     def handles(self, etf: Etf) -> bool:
@@ -1319,13 +1329,25 @@ class ArkSource(Source):
 
     def fetch(self, etf: Etf) -> Holdings:
         # The holdings file is named after the fund ("ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv"),
-        # not always as the ETF list spells it, so take the link from the fund page.
+        # not always as the ETF list spells it. The fund page loads its list of documents,
+        # the file among them, from an address with ARK's own fund number (ARKK: 1004).
         page_url = self.FUND_PAGE.format(ticker=etf.ticker.lower())
+        documents = self.download(
+            page_url, lambda d: self.DOCUMENTS.format(fund_id=find_ark_fund_id(d.decode(
+                "utf-8", errors="replace"))))
         url = self.download(
-            page_url,
-            lambda d: find_ark_csv(d.decode("utf-8", errors="replace"), page_url, etf.ticker))
+            documents,
+            lambda d: find_ark_csv(d.decode("utf-8", errors="replace"), documents, etf.ticker))
         holdings, preamble = self.download(url, lambda d: rows_to_holdings(read_csv_rows(d)))
         return Holdings(self.name, url, find_as_of(preamble), holdings)
+
+
+def find_ark_fund_id(page: str) -> str:
+    """ARK's number for a fund, from the script on its page: "/api/fund/document-table/1004"."""
+    match = re.search(r"/api/fund/document-table/(\d+)", page)
+    if not match:
+        raise NotAvailable("fund page has no list of documents")
+    return match.group(1)
 
 
 # e.g. https://assets.ark-funds.com/.../funds-etf-csv/ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv

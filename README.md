@@ -24,7 +24,7 @@
    | `pacer`       | names starting with "Pacer"          | CSV                 | In file         |
    | `schwab`      | names starting with "Schwab"         | HTML pages, 100 holdings each, loaded in the browser (the site refuses scripts) | On page |
    | `vaneck`      | names starting with "VanEck"         | Excel workbook      | In file         |
-   | `ark`         | names starting with "ARK"            | CSV, linked from the fund page | In file |
+   | `ark`         | names starting with "ARK"            | CSV, linked from the fund's list of documents | In file |
    | `direxion`    | names starting with "Direxion"       | CSV                 | In file, if given |
    | `dimensional` | names starting with "Dimensional" or "DFA", or ending in "Portfolio ETF Class Shares" | CSV, named by date | In file |
    | `avantis`     | Avantis (matched by ticker on the Avantis fund list) | Data embedded in the holdings page | On page |
@@ -66,7 +66,7 @@ python etf_holdings_scraper.py --sources ishares ssga --no-fallback   # issuer d
 A full run makes about one request per ETF, at most `--rate` requests per
 second to each website (default 2). Some sources need a few more: Vanguard
 asks for stocks and bonds separately, Schwab shows 100 holdings per page, ARK
-reads the fund page to find the file, and ProShares and VanEck may try a second
+reads the fund page and its list of documents to find the file, and ProShares and VanEck may try a second
 address. Innovator needs a single download for all its funds. VanEck's
 robots.txt asks for 25 seconds between requests, which the script honors, so
 its 90 funds take about 40 minutes in the background of a full run.

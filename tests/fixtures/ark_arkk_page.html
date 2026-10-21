@@ -1,3 +1,20 @@
-<!DOCTYPE html><html><head><title>ARKK | The ARK Innovation ETF managed by Cathie Wood</title></head><body>
-<div class="b-table__links"> <a class="b-table__link" href="https://assets.ark-funds.com/fund-documents/funds-etf-pdf/ARK_INNOVATION_ETF_ARKK_HOLDINGS.pdf" download=""> <span class="b-table__link-ico icon-pdf"></span> Full Holdings PDF </a> <a class="b-table__link" href="https://assets.ark-funds.com/fund-documents/funds-etf-csv/ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv" download=""> <span class="b-table__link-ico icon-csv"></span> Full Holdings CSV </a> </div>
+<!DOCTYPE html><html lang="en"><head><title>ARKK | The ARK Innovation ETF managed by Cathie Wood</title></head><body>
+<section class="b-documents" id="fdocs">
+<div class="ft-etfDocument-input"></div>
+<a class="purple-btn" href="https://www.ark-funds.com/download-fund-materials/" aria-label="" data-aos="animated" data-aos-delay="50">View All</a>
+</section>
+<script>
+	$(document).ready(function() {
+		let fundCheck = "1004";
+		if(fundCheck){
+			$.ajax({
+				type: 'GET',
+				url: "/api/fund/document-table/1004",
+				success: function (data) {
+					$(".ft-etfDocument-input").append(data);
+				}
+			})
+		}
+	});
+</script>
 </body></html>

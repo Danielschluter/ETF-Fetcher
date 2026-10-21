@@ -706,9 +706,10 @@ ARKK_CSV = ("https://assets.ark-funds.com/fund-documents/funds-etf-csv/"
             "ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv")
 
 
-def test_ark_source_follows_the_fund_page_link():
+def test_ark_source_finds_the_file_in_the_fund_documents():
     source = s.ArkSource(FakeFetcher({
         "https://www.ark-funds.com/funds/arkk": fixture("ark_arkk_page.html"),
+        s.ArkSource.DOCUMENTS.format(fund_id=1004): fixture("ark_arkk_documents.html"),
         ARKK_CSV: fixture("ark_arkk_holdings.csv"),
     }))
     assert source.handles(ARKK) and not source.handles(SPY)
@@ -725,6 +726,8 @@ def test_ark_source_follows_the_fund_page_link():
 def test_ark_fund_page_without_holdings_link():
     with pytest.raises(s.NotAvailable, match="links no holdings file"):
         s.find_ark_csv("<html><body>No holdings here</body></html>")
+    with pytest.raises(s.NotAvailable, match="no list of documents"):
+        s.find_ark_fund_id("<html><body>No documents here</body></html>")
 
 
 def test_ark_holdings_link_relative_or_in_script_data():

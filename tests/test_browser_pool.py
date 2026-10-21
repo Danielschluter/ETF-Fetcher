@@ -32,7 +32,9 @@ STUCK_PAGE = b"""<!DOCTYPE html><html><head>
 class FakeZacks(BaseHTTPRequestHandler):
     def do_GET(self):
         passed = "reese84=passed" in (self.headers.get("Cookie") or "")
-        if self.path.startswith("/funds/etf/SPY/"):
+        if self.path == "/user-agent":
+            body = (self.headers.get("User-Agent") or "").encode()
+        elif self.path.startswith("/funds/etf/SPY/"):
             body = HOLDINGS_PAGE if passed else BOT_CHECK_PAGE
         elif self.path.startswith("/funds/etf/STUCK"):
             body = STUCK_PAGE
@@ -103,6 +105,11 @@ def test_giving_up_on_one_website_leaves_others_alone(server, pool):
             pool.get(f"{server}/funds/etf/STUCK/holding")
     other_site = server.replace("127.0.0.1", "localhost")
     assert len(s.parse_zacks(pool.get(f"{other_site}/funds/etf/SPY/holding").decode())) == 4
+
+
+def test_browser_does_not_say_it_is_headless(server, pool):
+    page = pool.get(f"{server}/user-agent").decode()
+    assert "Chrome/" in page and "Headless" not in page
 
 
 def test_pages_load_in_parallel(server, pool):
