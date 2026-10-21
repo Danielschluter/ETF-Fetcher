@@ -30,12 +30,11 @@
    | `avantis`     | Avantis (matched by ticker on the Avantis fund list) | Data embedded in the holdings page | On page |
    | `american_century` | American Century (matched by ticker on its fund list) | Data embedded in the holdings page | On page |
    | `fidelity`    | names starting with "Fidelity"       | HTML page, weights only | On page (**month end**) |
+   | `goldman_sachs` | Goldman Sachs (the 48 ETFs listed in the script) | GraphQL query (POST), as its fund pages send it | In response |
    | `zacks`       | everything else, and the fallback when an issuer source fails | Web page, loaded in headless Chrome | **Not published** |
 
-   Together the issuer sources cover about 2,300 of the 5,800 ETFs, including
-   most of the largest. Goldman Sachs is not among them yet: its site loads
-   holdings through a query that needs the page's own request format, which
-   couldn't be captured here (see "Adding an issuer").
+   Together the issuer sources cover about 2,350 of the 5,800 ETFs, including
+   most of the largest.
 
    When a source has no file for a fund, errors out, or returns no rows, the
    next source is tried. The summary file records which source was used and why
@@ -80,7 +79,7 @@ the summary for the ETFs finished so far.
 |---|---|---|
 | `--tickers` | all ETFs | Space or comma separated |
 | `--limit N` | | Only the first N ETFs |
-| `--sources` | all issuer sources | Any of `ishares ssga invesco first_trust global_x vanguard proshares innovator pacer schwab vaneck ark direxion dimensional avantis american_century fidelity` |
+| `--sources` | all issuer sources | Any of `ishares ssga invesco first_trust global_x vanguard proshares innovator pacer schwab vaneck ark direxion dimensional avantis american_century fidelity goldman_sachs` |
 | `--no-fallback` | | Don't use Zacks (no browser needed) |
 | `--browser` | `chrome` | `chrome` (installed Google Chrome), `chromium` (after `playwright install chromium`), or a path to a browser |
 | `--browser-workers` | 4 | Browsers loading Zacks pages in parallel |
@@ -135,13 +134,13 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   It is filled where the source publishes market values: iShares, First
   Trust, Innovator (every one of its 179 funds), Dimensional, Avantis and
   American Century (all checked), and Vanguard, ProShares, Pacer, VanEck, ARK,
-  Direxion and Global X when their files include them. State Street and
-  Invesco publish no market values but already give weights to six decimals.
-  Schwab rounds its market values to a few digits ("$5.2B"), so they are left
-  blank. Fidelity's pages give weights only. Zacks rounds to 0.01% (AGG adds
-  up to 192% there) and publishes no market values, so its rows can't be
-  corrected. Dimensional publishes weights as fractions (0.0567); they are
-  converted to percent like the others.
+  Direxion, Goldman Sachs and Global X when their files include them. State
+  Street and Invesco publish no market values but already give weights to six
+  decimals. Schwab rounds its market values to a few digits ("$5.2B"), so they
+  are left blank. Fidelity's pages give weights only. Zacks rounds to 0.01%
+  (AGG adds up to 192% there) and publishes no market values, so its rows
+  can't be corrected. Dimensional publishes weights as fractions (0.0567); they
+  are converted to percent like the others.
 - **How `value_weight_pct` treats shorts and derivatives.** Short positions and
   written options have negative market values, so they get negative weights and
   each fund still adds up to 100% of net assets. An option's weight is the value
@@ -174,6 +173,13 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   publish only a stand-in "tracking basket"). No share counts or market
   values. To use Zacks for Fidelity funds instead, leave `fidelity` out of
   `--sources`.
+- **Goldman Sachs funds are looked up by ID.** Its fund pages load "All
+  Holdings" with a GraphQL query that takes each fund's product number and
+  share class ID; the Fund Finder that lists them is filled in by the browser,
+  so the script carries a table of all 48 Goldman Sachs ETFs as of 2026-10-21
+  (`GoldmanSachsSource.FUNDS`). A newer fund falls back to Zacks until it is
+  added: its fund page address has both IDs, as in
+  `am.gs.com/en-us/individual/funds/detail/PV102394/381430503/...`.
 - **Leveraged and inverse funds list their exposure.** ProShares gives swaps
   and futures an exposure weight and an exposure value (`notional_value`) but
   no market value; their gains and losses are in the "Net Other Assets" row.
@@ -219,17 +225,16 @@ with one CSV per fund at an address made from the ticker needs only a
 Pacer's and Innovator's files share one layout (Date, Account, StockTicker,
 CUSIP, SecurityName, Shares, Price, MarketValue, Weightings, NetAssets...),
 from their fund administrator, U.S. Bank; other funds it administers may
-publish the same columns, which are already mapped. Remaining issuers by fund
-count: Corgi, Leverage Shares, GraniteShares, Defiance, Tradr, JPMorgan, PGIM,
-Franklin, Goldman Sachs and WisdomTree. Of those checked so far, Defiance's
-site blocked the tool used to capture samples, WisdomTree's holdings files
-are addressed by document IDs rather than tickers, and JPMorgan's fund pages
-load their data with JavaScript. Goldman Sachs's fund pages fetch "All
-Holdings" with a GraphQL POST to `https://am.gs.com/services/funds` (query
-`getFundsDetail`, fragment `allHoldings`); its request variables weren't
-recoverable from the site's scripts. Copying that request from a browser's
-developer tools (Network tab, then "download" under All Holdings on a fund
-page) would give everything needed to add it.
+publish the same columns, which are already mapped. Sites that load holdings
+with JavaScript usually fetch them from an API the script can call directly:
+find the request in a browser's developer tools (Network tab, Fetch/XHR, then
+reload the fund page) and copy it, as was done for Goldman Sachs.
+`Source.download()` takes a JSON `payload` for APIs that need a POST.
+Remaining issuers by fund count: Corgi, Leverage Shares, GraniteShares,
+Defiance, Tradr, JPMorgan, PGIM, Franklin and WisdomTree. Of those checked so
+far, Defiance's site blocked the tool used to capture samples, WisdomTree's
+holdings files are addressed by document IDs rather than tickers, and
+JPMorgan's fund pages load their data with JavaScript.
 
 ## Tests
 

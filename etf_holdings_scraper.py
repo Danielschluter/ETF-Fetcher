@@ -21,6 +21,7 @@ plus a catch-all source for every ETF without a dedicated issuer scraper:
   avantis      Avantis total-holdings page (American Century)
   american_century  American Century total-holdings page
   fidelity     Fidelity research holdings page (month-end holdings, weights only)
+  goldman_sachs  Goldman Sachs fund data service (GraphQL)
   zacks       Zacks ETF holdings page: used for all other ETFs, and as the
                fallback whenever an issuer source fails. Zacks turns away plain
                HTTP clients, so its pages are loaded in headless Chrome (via
@@ -232,12 +233,19 @@ class HttpClient:
             return self.limiters[host]
 
     def get(self, url: str) -> bytes:
+        return self._fetch(url)
+
+    def post_json(self, url: str, payload: dict, headers: dict | None = None) -> bytes:
+        return self._fetch(url, payload, headers)
+
+    def _fetch(self, url: str, payload: dict | None = None,
+               headers: dict | None = None) -> bytes:
         host = urlsplit(url).hostname or ""
         limiter = self._limiter(host)
         for pause in (*self.BOT_CHECK_PAUSES, None):
             if host in self.given_up:
                 raise Blocked(f"skipped: {host} kept answering with a bot check")
-            resp = self._get_with_retries(url, limiter)
+            resp = self._send_with_retries(url, limiter, payload, headers)
             if not looks_like_bot_check(resp):
                 with self.lock:
                     self.blocked_streak[host] = 0
@@ -253,12 +261,17 @@ class HttpClient:
                           "this run. Run again later to fill in the gaps.", host)
         raise Blocked(f"{host} answered with a bot check")
 
-    def _get_with_retries(self, url: str, limiter: RateLimiter) -> requests.Response:
+    def _send_with_retries(self, url: str, limiter: RateLimiter, payload: dict | None,
+                           headers: dict | None) -> requests.Response:
         for attempt in range(self.retries + 1):
             limiter.wait()
             delay = 2.0 ** (attempt + 1)
             try:
-                resp = self._session().get(url, timeout=self.timeout)
+                if payload is None:
+                    resp = self._session().get(url, timeout=self.timeout)
+                else:
+                    resp = self._session().post(url, json=payload, headers=headers,
+                                                timeout=self.timeout)
             except requests.RequestException as exc:
                 error: Exception = exc
             else:
@@ -461,17 +474,33 @@ class Fetcher:
         self.refresh = refresh
 
     def get(self, url: str, max_age: float = HOLDINGS_TTL) -> bytes:
+        return self._cached(url, max_age, lambda: self.http.get(url))
+
+    def post_json(self, url: str, payload: dict, headers: dict | None = None,
+                  max_age: float = HOLDINGS_TTL) -> bytes:
+        return self._cached(request_key(url, payload), max_age,
+                            lambda: self.http.post_json(url, payload, headers))
+
+    def _cached(self, key: str, max_age: float, download: Callable[[], bytes]) -> bytes:
         if not self.refresh:
-            cached = self.cache.read(url, max_age)
+            cached = self.cache.read(key, max_age)
             if cached is not None:
                 return cached
-        data = self.http.get(url)
-        self.cache.write(url, data)
+        data = download()
+        self.cache.write(key, data)
         return data
 
-    def forget(self, url: str) -> None:
+    def forget(self, key: str) -> None:
         """Drop a cached response, e.g. an error page that should not be served again."""
-        self.cache.delete(url)
+        self.cache.delete(key)
+
+
+def request_key(url: str, payload: dict | None = None) -> str:
+    """What a response is cached under: the URL, plus a digest of what was posted to it."""
+    if payload is None:
+        return url
+    body = json.dumps(payload, sort_keys=True).encode()
+    return f"{url}#{hashlib.sha1(body).hexdigest()}"
 
 
 # ----------------------------------------------------------------------- Universe
@@ -789,14 +818,19 @@ class Source:
     def fetch(self, etf: Etf) -> Holdings:
         raise NotImplementedError
 
-    def download(self, url: str, parse: Callable[[bytes], T]) -> T:
-        """Fetch url and parse it. A response that can't be parsed is usually an error
-        or bot-check page: it is dropped from the cache, and the error says what it was."""
-        data = self.fetcher.get(url)
+    def download(self, url: str, parse: Callable[[bytes], T], payload: dict | None = None,
+                 headers: dict | None = None) -> T:
+        """Fetch url (or post payload to it as JSON) and parse the response. A response
+        that can't be parsed is usually an error or bot-check page: it is dropped from
+        the cache, and the error says what it was."""
+        if payload is None:
+            data = self.fetcher.get(url)
+        else:
+            data = self.fetcher.post_json(url, payload, headers)
         try:
             return parse(data)
         except Exception as exc:
-            self.fetcher.forget(url)
+            self.fetcher.forget(request_key(url, payload))
             reason = str(exc) if isinstance(exc, NotAvailable) else f"{type(exc).__name__}: {exc}"
             raise NotAvailable(f"{reason}; {describe_response(data)}") from None
 
@@ -1438,6 +1472,100 @@ def parse_fidelity(page: str) -> tuple[str, list[dict]]:
     return find_as_of(header.get_text(" ", strip=True)) if header else "", holdings
 
 
+class GoldmanSachsSource(Source):
+    """Goldman Sachs's fund pages load all holdings with a GraphQL query (a POST), which
+    takes the fund's product number and share class ID (its CUSIP). Those come from the
+    Fund Finder, which only fills in its list in the browser, so they are listed here:
+    all 48 Goldman Sachs ETFs on 2026-10-21. A newer fund falls back to Zacks until it
+    is added (see the README)."""
+
+    name = "goldman_sachs"
+    URL = "https://am.gs.com/services/funds"
+    QUERY = """query getFundsDetail($fundDetailRequest: FundDetailRequest) {
+  fundsDetail(fundDetailRequest: $fundDetailRequest) {
+    ticker
+    allHoldings {
+      asAtDate
+      holdings { holding ticker cusip isin sedol securityIdentifier numberOfShares
+                 marketValue portfolio coupon maturityDate }
+    }
+  }
+}"""
+    FUNDS = {  # ticker: (product number, share class ID)
+        "AAAU": ("PV103623", "38150K103"), "GBIL": ("PV102645", "381430529"),
+        "GBND": ("PV109040", "38149W473"), "GCAL": ("PV105933", "38149W564"),
+        "GCOR": ("PV103404", "38149W101"), "GCPB": ("PV110568", "38151N809"),
+        "GDOC": ("PV103944", "38149W770"), "GEM": ("PV102391", "381430206"),
+        "GEMD": ("PV102979", "381430388"), "GEMQ": ("PV110439", "38149W390"),
+        "GGUS": ("PV105434", "38149W598"), "GHYB": ("PV102746", "381430453"),
+        "GIEQ": ("PV110311", "38149W382"), "GIGB": ("PV102748", "381430479"),
+        "GIGL": ("PV109041", "38149W465"), "GINC": ("PV110567", "38151N882"),
+        "GIND": ("PV106306", "38149W481"), "GINN": ("PV103686", "38149W820"),
+        "GMNY": ("PV105932", "38149W556"), "GMUB": ("PV105934", "38149W549"),
+        "GPIQ": ("PV105259", "38149W630"), "GPIX": ("PV105258", "38149W622"),
+        "GPRF": ("PV105611", "38149W127"), "GSC": ("PV105332", "38149W614"),
+        "GSEE": ("PV103363", "381430164"), "GSEU": ("PV102392", "381430305"),
+        "GSEW": ("PV102787", "381430438"), "GSGO": ("PV109510", "38149W440"),
+        "GSID": ("PV103362", "381430180"), "GSIE": ("PV102390", "381430107"),
+        "GSJY": ("PV102393", "381430404"), "GSLC": ("PV102394", "381430503"),
+        "GSSC": ("PV102395", "381430602"), "GSST": ("PV103157", "381430230"),
+        "GSUS": ("PV103365", "381430123"), "GSWO": ("PV104218", "38149W739"),
+        "GTEK": ("PV103849", "38149W812"), "GTIP": ("PV102998", "381430362"),
+        "GTOP": ("PV109507", "38149W432"), "GTPE": ("PV109407", "38149W457"),
+        "GUMI": ("PV105931", "38149W572"), "GUSA": ("PV104276", "38150W107"),
+        "GUSE": ("PV109508", "38149W424"), "GVIP": ("PV102634", "381430545"),
+        "GVLE": ("PV109509", "38149W416"), "GVUS": ("PV105433", "38149W580"),
+        "GXUS": ("PV104572", "38150W206"), "JUST": ("PV102957", "381430396"),
+    }
+
+    def handles(self, etf: Etf) -> bool:
+        return etf.ticker in self.FUNDS
+
+    def fetch(self, etf: Etf) -> Holdings:
+        product, share_class = self.FUNDS[etf.ticker]
+        payload = {
+            "operationName": "getFundsDetail",
+            "query": self.QUERY,
+            "variables": {"fundDetailRequest": {
+                "country": "us", "language": "en", "audience": "individual",
+                "pvNumber": product, "shareClassId": share_class}},
+        }
+        as_of, holdings = self.download(
+            self.URL, lambda d: parse_goldman_sachs(json.loads(d), etf.ticker),
+            payload=payload, headers={"Origin": "https://am.gs.com"})
+        return Holdings(self.name, self.URL, as_of, holdings)
+
+
+def parse_goldman_sachs(data: dict, ticker: str) -> tuple[str, list[dict]]:
+    """(as-of date, holdings) from Goldman Sachs's getFundsDetail response."""
+    if data.get("errors"):
+        messages = "; ".join(str(e.get("message", e)) for e in data["errors"])
+        raise NotAvailable(f"the query was refused: {messages}")
+    fund = (data.get("data") or {}).get("fundsDetail")
+    if not fund:
+        raise NotAvailable("no such fund")
+    if fund.get("ticker") and fund["ticker"].upper() != ticker:
+        raise NotAvailable(f"the IDs listed for {ticker} belong to {fund['ticker']}")
+    all_holdings = fund.get("allHoldings") or {}
+    holdings = [
+        normalize_holding({
+            "holding_name": h.get("holding"),
+            "ticker": h.get("ticker"),
+            "cusip": h.get("cusip"),
+            "isin": h.get("isin"),
+            "sedol": h.get("sedol"),
+            "other_id": h.get("securityIdentifier"),
+            "shares": h.get("numberOfShares"),
+            "market_value": h.get("marketValue"),
+            "weight_pct": h.get("portfolio"),
+            "coupon_rate": h.get("coupon"),
+            "maturity_date": h.get("maturityDate"),
+        })
+        for h in all_holdings.get("holdings") or []
+    ]
+    return parse_date(str(all_holdings.get("asAtDate") or "")), holdings
+
+
 class ZacksSource(Source):
     name = "zacks"
     HOLDINGS = "https://www.zacks.com/funds/etf/{ticker}/holding"
@@ -1505,6 +1633,7 @@ ISSUER_SOURCES: dict[str, type[Source]] = {
     "avantis": AvantisSource,
     "american_century": AmericanCenturySource,
     "fidelity": FidelitySource,
+    "goldman_sachs": GoldmanSachsSource,
 }
 
 

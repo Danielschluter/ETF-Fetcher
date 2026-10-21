@@ -46,11 +46,16 @@ def ssga_workbook() -> bytes:
 
 
 class FakeFetcher:
-    """Serves canned responses by URL; anything else is a 404."""
+    """Serves canned responses by URL (by s.request_key for POSTs); anything else is a 404."""
 
     def __init__(self, responses: dict):
         self.responses = responses
         self.requested: list[str] = []
+        self.posted: list[tuple] = []
+
+    def post_json(self, url, payload, headers=None, max_age=s.HOLDINGS_TTL):
+        self.posted.append((url, payload, headers))
+        return self.get(s.request_key(url, payload))
 
     def get(self, url, max_age=s.HOLDINGS_TTL):
         self.requested.append(url)
@@ -197,9 +202,14 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.requested = []
+        self.posted = []
 
     def get(self, url, timeout):
         self.requested.append(url)
+        return self.responses.pop(0)
+
+    def post(self, url, json, headers, timeout):
+        self.posted.append((url, json, headers))
         return self.responses.pop(0)
 
 
@@ -246,6 +256,35 @@ def test_site_that_keeps_blocking_is_skipped(monkeypatch):
     with pytest.raises(s.Blocked, match="skipped: www.zacks.com"):
         client.get(ZACKS_URL.format("D"))
     assert len(session.requested) == 12
+
+
+def test_post_json_sends_the_payload(monkeypatch):
+    client, session, _ = client_serving(
+        [html_response(b'{"data": {}}', content_type="application/json")], monkeypatch)
+    payload = {"query": "query q { x }"}
+    assert client.post_json("https://example.com/graphql", payload, {"Origin": "x"}) == (
+        b'{"data": {}}')
+    assert session.posted == [("https://example.com/graphql", payload, {"Origin": "x"})]
+    assert session.requested == []
+
+
+def test_posted_responses_are_cached_per_payload(tmp_path):
+    class Http:
+        calls = 0
+
+        def post_json(self, url, payload, headers=None):
+            self.calls += 1
+            return json.dumps(payload).encode()
+
+    http = Http()
+    fetcher = s.Fetcher(http, s.DiskCache(tmp_path))
+    url = "https://example.com/graphql"
+    assert fetcher.post_json(url, {"id": 1}) == b'{"id": 1}'
+    assert fetcher.post_json(url, {"id": 2}) == b'{"id": 2}'
+    assert fetcher.post_json(url, {"id": 1}) == b'{"id": 1}'
+    assert http.calls == 2
+    assert s.request_key(url, {"id": 1}) != s.request_key(url, {"id": 2})
+    assert s.request_key(url) == url
 
 
 def test_blocked_response_is_not_cached(tmp_path, monkeypatch):
@@ -1035,3 +1074,44 @@ def test_disk_cache_round_trip(tmp_path):
 def test_parse_args_splits_tickers():
     args = s.parse_args(["--tickers", "spy,ivv", "qqq"])
     assert args.tickers == ["SPY", "IVV", "QQQ"]
+
+
+GSLC = s.Etf("GSLC", "Goldman Sachs ActiveBeta U.S. Large Cap Equity ETF", "NYSE Arca")
+# The request a browser sends for GSLC's fund page, with only the fields read here.
+GSLC_REQUEST = {
+    "operationName": "getFundsDetail",
+    "query": s.GoldmanSachsSource.QUERY,
+    "variables": {"fundDetailRequest": {"country": "us", "language": "en", "audience": "individual",
+                                        "pvNumber": "PV102394", "shareClassId": "381430503"}},
+}
+
+
+def goldman_fetcher(response: bytes) -> FakeFetcher:
+    return FakeFetcher({s.request_key(s.GoldmanSachsSource.URL, GSLC_REQUEST): response})
+
+
+def test_goldman_sachs_source_posts_the_fund_query():
+    fetcher = goldman_fetcher(fixture("goldman_gslc_holdings.json"))
+    source = s.GoldmanSachsSource(fetcher)
+    assert source.handles(GSLC) and not source.handles(SPY)
+    result = source.fetch(GSLC)
+    assert fetcher.posted == [
+        ("https://am.gs.com/services/funds", GSLC_REQUEST, {"Origin": "https://am.gs.com"})]
+    assert result.as_of == "2026-10-19"
+    assert [h["ticker"] for h in result.rows] == ["MMM", "ABBV", "GOOGL", "GOOG", "AMZN"]
+    googl = result.rows[2]
+    assert (googl["holding_name"], googl["isin"], googl["sedol"], googl["cusip"]) == (
+        "ALPHABET INC.", "US02079K3059", "BYVY8G0", "")
+    assert (googl["shares"], googl["market_value"], googl["weight_pct"]) == (
+        1277549.0, 439706814.82, 2.9)
+
+
+def test_goldman_sachs_query_errors_are_reported():
+    refused = b'{"errors": [{"message": "Validation error of type FieldUndefined"}]}'
+    with pytest.raises(s.NotAvailable, match="the query was refused: Validation error"):
+        s.GoldmanSachsSource(goldman_fetcher(refused)).fetch(GSLC)
+    with pytest.raises(s.NotAvailable, match="no such fund"):
+        s.GoldmanSachsSource(goldman_fetcher(b'{"data": {"fundsDetail": null}}')).fetch(GSLC)
+    other = b'{"data": {"fundsDetail": {"ticker": "GSUS", "allHoldings": null}}}'
+    with pytest.raises(s.NotAvailable, match="belong to GSUS"):
+        s.GoldmanSachsSource(goldman_fetcher(other)).fetch(GSLC)
