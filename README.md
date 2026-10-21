@@ -132,9 +132,9 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   though together they are 21.6% of the fund, so its weights add up to 81.88%.
   `value_weight_pct` fixes this by dividing each market value by the fund's total.
   It is filled where the source publishes market values: iShares, First
-  Trust, Innovator (every one of its 179 funds), Dimensional, Avantis and
-  American Century (all checked), and Vanguard, ProShares, Pacer, VanEck, ARK,
-  Direxion, Goldman Sachs and Global X when their files include them. State
+  Trust, Innovator (every one of its 179 funds), Dimensional, Avantis,
+  American Century and Goldman Sachs (all checked), and Vanguard, ProShares,
+  Pacer, VanEck, ARK, Direxion and Global X when their files include them. State
   Street and Invesco publish no market values but already give weights to six
   decimals. Schwab rounds its market values to a few digits ("$5.2B"), so they
   are left blank. Fidelity's pages give weights only. Zacks rounds to 0.01%
@@ -179,7 +179,9 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   so the script carries a table of all 48 Goldman Sachs ETFs as of 2026-10-21
   (`GoldmanSachsSource.FUNDS`). A newer fund falls back to Zacks until it is
   added: its fund page address has both IDs, as in
-  `am.gs.com/en-us/individual/funds/detail/PV102394/381430503/...`.
+  `am.gs.com/en-us/individual/funds/detail/PV102394/381430503/...`. Checked
+  live on 2026-10-21: GSLC, GBND and GPIX returned 429, 733 and 489 holdings
+  as of 2026-10-19, with weights adding up to 99.95–100.02%.
 - **Leveraged and inverse funds list their exposure.** ProShares gives swaps
   and futures an exposure weight and an exposure value (`notional_value`) but
   no market value; their gains and losses are in the "Net Other Assets" row.
