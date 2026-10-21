@@ -66,7 +66,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -346,12 +346,13 @@ class BrowserPool:
         self.browser = browser
         self.headless = headless
         self.timeout_ms = timeout * 1000
-        self.limiter = RateLimiter(rate)
+        self.rate = rate
+        self.limiters: dict[str, RateLimiter] = {}
         self.jobs: queue.Queue = queue.Queue()
         self.threads: list[threading.Thread] = []
         self.lock = threading.Lock()
-        self.blocked_streak = 0
-        self.given_up = False
+        self.blocked_streak: Counter = Counter()  # per website, like the rate limits
+        self.given_up: set[str] = set()
 
     def start(self) -> None:
         try:
@@ -371,8 +372,7 @@ class BrowserPool:
             self.threads.append(thread)
 
     def get(self, url: str) -> bytes:
-        if self.given_up:
-            raise Blocked("skipped: Zacks kept answering with a bot check")
+        self._check_given_up(url)
         future: Future = Future()
         self.jobs.put((url, future))
         return future.result()
@@ -426,16 +426,23 @@ class BrowserPool:
             if not future.set_running_or_notify_cancel():
                 continue
             try:
-                if self.given_up:
-                    raise Blocked("skipped: Zacks kept answering with a bot check")
+                self._check_given_up(url)
                 if page.is_closed():
                     page = browser.new_page()
                 future.set_result(self._load(page, url))
             except Exception as exc:
                 future.set_exception(exc)
 
+    def _check_given_up(self, url: str) -> None:
+        host = urlsplit(url).hostname or ""
+        if host in self.given_up:
+            raise Blocked(f"skipped: {host} kept answering with a bot check")
+
     def _load(self, page, url: str) -> bytes:
-        self.limiter.wait()
+        host = urlsplit(url).hostname or ""
+        with self.lock:
+            limiter = self.limiters.setdefault(host, RateLimiter(self.rate))
+        limiter.wait()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
         except Exception:
@@ -449,20 +456,21 @@ class BrowserPool:
             except Exception:  # the page is reloading
                 html = ""
             if html and not _BOT_CHECK.search(html):
-                self._record(blocked=False)
+                self._record(host, blocked=False)
                 return html.encode("utf-8")
             if time.monotonic() > deadline:
-                self._record(blocked=True)
+                self._record(host, blocked=True)
                 raise Blocked("answered with a bot check that did not clear")
             page.wait_for_timeout(500)
 
-    def _record(self, blocked: bool) -> None:
+    def _record(self, host: str, blocked: bool) -> None:
         with self.lock:
-            self.blocked_streak = self.blocked_streak + 1 if blocked else 0
-            if self.blocked_streak >= self.GIVE_UP_AFTER and not self.given_up:
-                self.given_up = True
-                log.error("Zacks keeps answering with a bot check, even in a browser; skipping "
-                          "it for the rest of this run. Run again later to fill in the gaps.")
+            self.blocked_streak[host] = self.blocked_streak[host] + 1 if blocked else 0
+            if self.blocked_streak[host] >= self.GIVE_UP_AFTER and host not in self.given_up:
+                self.given_up.add(host)
+                log.error("%s keeps answering with a bot check, even in a browser; skipping "
+                          "it for the rest of this run. Run again later to fill in the gaps.",
+                          host)
 
 
 class Fetcher:
@@ -805,6 +813,7 @@ class Holdings:
 
 class Source:
     name = ""
+    needs_browser = False  # the website turns plain HTTP clients away
 
     def __init__(self, fetcher: Fetcher):
         self.fetcher = fetcher
@@ -1038,9 +1047,12 @@ class GlobalXSource(DatedFileSource):
 class DimensionalSource(DatedFileSource):
     name = "dimensional"
     HOLDINGS = "https://tools-blob.dimensional.com/etf/{date:%Y%m%d}/{ticker}.csv"
+    # Twelve are ETF share classes of its mutual funds, named like
+    # "U.S. Core Equity 2 Portfolio ETF Class Shares" (DFAC).
+    NAME = re.compile(r"^(Dimensional|DFA)\b|\bPortfolio:? ETF Class Shares$")
 
     def handles(self, etf: Etf) -> bool:
-        return etf.name.lower().startswith("dimensional")
+        return bool(self.NAME.search(etf.name))
 
     def parse(self, data: bytes) -> tuple[list[dict], str]:
         # "identifier" holds CUSIPs, and weights are fractions: 0.0567 means 5.67%.
@@ -1231,6 +1243,7 @@ def parse_proshares(page: str) -> tuple[str, list[dict]]:
 
 class SchwabSource(Source):
     name = "schwab"
+    needs_browser = True  # it answers scripts with 403 Forbidden
     HOLDINGS = "https://www.schwabassetmanagement.com/allholdings/{ticker}?page={page}"
 
     def handles(self, etf: Etf) -> bool:
@@ -1308,20 +1321,25 @@ class ArkSource(Source):
         # The holdings file is named after the fund ("ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv"),
         # not always as the ETF list spells it, so take the link from the fund page.
         page_url = self.FUND_PAGE.format(ticker=etf.ticker.lower())
-        url = self.download(page_url, lambda d: find_ark_csv(d.decode("utf-8", errors="replace")))
+        url = self.download(
+            page_url,
+            lambda d: find_ark_csv(d.decode("utf-8", errors="replace"), page_url, etf.ticker))
         holdings, preamble = self.download(url, lambda d: rows_to_holdings(read_csv_rows(d)))
         return Holdings(self.name, url, find_as_of(preamble), holdings)
 
 
-_ARK_CSV = re.compile(
-    r"https://assets\.ark-funds\.com/fund-documents/funds-etf-csv/[^\"'<>\s]+\.csv")
+# e.g. https://assets.ark-funds.com/.../funds-etf-csv/ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv
+_ARK_CSV = re.compile(r"[^\"'<>\s=]+_HOLDINGS\.csv", re.IGNORECASE)
 
 
-def find_ark_csv(page: str) -> str:
-    match = _ARK_CSV.search(page)
-    if not match:
+def find_ark_csv(page: str, page_url: str = "https://www.ark-funds.com/",
+                 ticker: str = "") -> str:
+    """The fund's holdings CSV linked from its page, preferring a file named for its ticker."""
+    links = _ARK_CSV.findall(page.replace("\\/", "/"))  # also in JSON-escaped script data
+    if not links:
         raise NotAvailable("fund page links no holdings file")
-    return html.unescape(match.group(0))
+    own = [link for link in links if f"_{ticker.upper()}_HOLDINGS" in link.upper()]
+    return urljoin(page_url, html.unescape((own or links)[0]))
 
 
 class AmericanCenturySource(Source):
@@ -1831,16 +1849,31 @@ def run(args: argparse.Namespace, http: HttpClient | None = None,
     log.info("Found %d US-listed ETFs", len(universe))
     etfs = select_etfs(universe, args.tickers, args.limit)
 
-    issuers = [ISSUER_SOURCES[name](fetcher) for name in args.sources]
+    # Zacks, and a few issuer websites, turn away plain HTTP clients, so their pages
+    # are loaded in a browser.
+    need_browser = [n for n in args.sources if ISSUER_SOURCES[n].needs_browser]
+    browser_fetcher = None
+    if not args.no_fallback or need_browser:
+        browser = browser or BrowserPool(args.browser_workers, args.rate, args.browser,
+                                         headless=not args.show_browser)
+        try:
+            browser.start()
+        except SetupError as exc:
+            if not args.no_fallback:
+                raise
+            log.warning("%s; %s ETFs will have no holdings", exc, ", ".join(need_browser))
+            browser = None
+        else:
+            browser_fetcher = Fetcher(browser, cache, args.refresh)
+    issuers = [ISSUER_SOURCES[name](browser_fetcher if ISSUER_SOURCES[name].needs_browser
+                                    else fetcher)
+               for name in args.sources
+               if browser_fetcher is not None or not ISSUER_SOURCES[name].needs_browser]
     for source in issuers:
         source.prepare()
     fallback = None
-    if not args.no_fallback:
-        # Zacks turns away plain HTTP clients, so its pages are loaded in a browser.
-        browser = browser or BrowserPool(args.browser_workers, args.rate, args.browser,
-                                         headless=not args.show_browser)
-        browser.start()
-        fallback = ZacksSource(Fetcher(browser, cache, args.refresh))
+    if browser_fetcher is not None and not args.no_fallback:
+        fallback = ZacksSource(browser_fetcher)
     try:
         return scrape_all(args, etfs, HoldingsScraper(issuers, fallback))
     finally:

@@ -727,6 +727,17 @@ def test_ark_fund_page_without_holdings_link():
         s.find_ark_csv("<html><body>No holdings here</body></html>")
 
 
+def test_ark_holdings_link_relative_or_in_script_data():
+    page_url = "https://www.ark-funds.com/funds/arkk"
+    relative = '<a href="/csv/ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv">'
+    assert s.find_ark_csv(relative, page_url) == (
+        "https://www.ark-funds.com/csv/ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv")
+    script = ('{"etfs":[{"csv":"https:\\/\\/assets.ark-funds.com\\/ARK_FINTECH_ARKF_HOLDINGS.csv"},'
+              '{"csv":"https:\\/\\/assets.ark-funds.com\\/ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv"}]}')
+    assert s.find_ark_csv(script, page_url, "ARKK") == (
+        "https://assets.ark-funds.com/ARK_INNOVATION_ETF_ARKK_HOLDINGS.csv")
+
+
 def test_direxion_source():
     # Representative: columns as in a copy of SOXL's file; Direxion's site blocked the capture tool.
     soxl = s.Etf("SOXL", "Direxion Daily Semiconductor Bull 3X Shares", "NYSE Arca")
@@ -744,7 +755,7 @@ DIMENSIONAL_URL = "https://tools-blob.dimensional.com/etf/{}/DFAC.csv"
 
 
 def test_dimensional_source_looks_back_for_latest_file():
-    dfac = s.Etf("DFAC", "Dimensional U.S. Core Equity 2 ETF", "NYSE Arca")
+    dfac = s.Etf("DFAC", "U.S. Core Equity 2 Portfolio ETF Class Shares", "NYSE Arca")
     fetcher = FakeFetcher(
         {DIMENSIONAL_URL.format("20261013"): fixture("dimensional_dfac_holdings.csv")})
     source = s.DimensionalSource(fetcher, today=dt.date(2026, 10, 15))
@@ -760,6 +771,17 @@ def test_dimensional_source_looks_back_for_latest_file():
     assert (nvda["shares"], nvda["market_value"]) == (22553641.0, 5153958041.32)
     assert nvda["weight_pct"] == 5.81701798  # published as the fraction 0.0581701798
     assert result.rows[0]["weight_pct"] == 0.01619189
+
+
+@pytest.mark.parametrize("name, handled", [
+    ("Dimensional US Equity Market ETF", True),
+    ("DFA Real Estate Securities Portfolio ETF Class Shares", True),
+    ("U.S. Small Cap Portfolio: ETF Class Shares", True),
+    ("Nuveen Dividend Growth Fund: ETF Class Shares", False),
+    ("Vanguard Short-Term Inflation-Protected Securities Index Fund ETF Shares", False),
+])
+def test_dimensional_funds_by_name(name, handled):
+    assert s.DimensionalSource(FakeFetcher({})).handles(s.Etf("X", name, "")) is handled
 
 
 AVANTIS_HOLDINGS = ("https://www.avantisinvestors.com/avantis-investments/total-holdings/{}/"
@@ -986,6 +1008,43 @@ class FakeBrowser(FakeHttp):
 
     def close(self):
         self.closed = True
+
+
+SCHD_DIRECTORY = (fixture("nasdaqtraded_sample.txt").decode().splitlines()[0] + "\n"
+                  "Y|SCHD|Schwab U.S. Dividend Equity ETF|P| |Y|100|N||SCHD|SCHD|N\n"
+                  "Y|SPY|State Street SPDR S&P 500 ETF Trust|P| |Y|100|N||SPY|SPY|N\n").encode()
+
+
+def test_run_loads_schwab_pages_in_the_browser_without_zacks(tmp_path):
+    http = FakeHttp({s.NASDAQ_SYMBOL_DIRECTORY: SCHD_DIRECTORY})
+    browser = FakeBrowser({SCHWAB_URL.format(0): fixture("schwab_schd_page0.html"),
+                           SCHWAB_URL.format(1): fixture("schwab_schd_page1.html")})
+    args = s.parse_args(["--tickers", "SCHD", "--sources", "schwab", "--no-fallback",
+                         "--output-dir", str(tmp_path), "--no-cache"])
+    assert s.run(args, http=http, browser=browser) == 0
+    assert browser.started and browser.closed
+    assert browser.fetcher.requested == [SCHWAB_URL.format(0), SCHWAB_URL.format(1)]
+    assert http.fetcher.requested == [s.NASDAQ_SYMBOL_DIRECTORY]
+    with (tmp_path / "etf_summary.csv").open() as fh:
+        summary = next(csv.DictReader(fh))
+    assert (summary["status"], summary["source"], summary["holdings_count"]) == (
+        "ok", "schwab", "4")
+
+
+def test_run_without_a_browser_skips_sources_that_need_one(tmp_path, caplog):
+    class NoBrowser(FakeBrowser):
+        def start(self):
+            raise s.SetupError("could not start the browser (chrome): not installed")
+
+    http = FakeHttp({s.NASDAQ_SYMBOL_DIRECTORY: SCHD_DIRECTORY, SPY_URL: ssga_workbook()})
+    args = s.parse_args(["--tickers", "SCHD", "SPY", "--sources", "schwab", "ssga",
+                         "--no-fallback", "--output-dir", str(tmp_path), "--no-cache"])
+    assert s.run(args, http=http, browser=NoBrowser({})) == 0
+    assert "schwab ETFs will have no holdings" in caplog.text
+    with (tmp_path / "etf_summary.csv").open() as fh:
+        summary = {row["ticker"]: row for row in csv.DictReader(fh)}
+    assert summary["SCHD"]["detail"] == "no source covers this ETF"
+    assert summary["SPY"]["source"] == "ssga"
 
 
 def test_run_writes_holdings_and_summary(tmp_path):

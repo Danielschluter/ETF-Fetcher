@@ -22,11 +22,11 @@
    | `proshares`   | names starting with "ProShares"      | HTML fund page      | On page         |
    | `innovator`   | names starting with "Innovator"      | One CSV for all Innovator funds | In file |
    | `pacer`       | names starting with "Pacer"          | CSV                 | In file         |
-   | `schwab`      | names starting with "Schwab"         | HTML pages, 100 holdings each | On page |
+   | `schwab`      | names starting with "Schwab"         | HTML pages, 100 holdings each, loaded in the browser (the site refuses scripts) | On page |
    | `vaneck`      | names starting with "VanEck"         | Excel workbook      | In file         |
    | `ark`         | names starting with "ARK"            | CSV, linked from the fund page | In file |
    | `direxion`    | names starting with "Direxion"       | CSV                 | In file, if given |
-   | `dimensional` | names starting with "Dimensional"    | CSV, named by date  | In file         |
+   | `dimensional` | names starting with "Dimensional" or "DFA", or ending in "Portfolio ETF Class Shares" | CSV, named by date | In file |
    | `avantis`     | Avantis (matched by ticker on the Avantis fund list) | Data embedded in the holdings page | On page |
    | `american_century` | American Century (matched by ticker on its fund list) | Data embedded in the holdings page | On page |
    | `fidelity`    | names starting with "Fidelity"       | HTML page, weights only | On page (**month end**) |
@@ -43,8 +43,9 @@
 ## Usage
 
 Set up once, in the project folder. A virtual environment keeps the packages
-inside the project, which Homebrew's Python on macOS requires. Zacks pages are
-loaded in your installed Google Chrome, running hidden in the background:
+inside the project, which Homebrew's Python on macOS requires. Zacks and Schwab
+pages are loaded in your installed Google Chrome, running hidden in the
+background:
 
 ```bash
 python3 -m venv .venv
@@ -80,7 +81,7 @@ the summary for the ETFs finished so far.
 | `--tickers` | all ETFs | Space or comma separated |
 | `--limit N` | | Only the first N ETFs |
 | `--sources` | all issuer sources | Any of `ishares ssga invesco first_trust global_x vanguard proshares innovator pacer schwab vaneck ark direxion dimensional avantis american_century fidelity goldman_sachs` |
-| `--no-fallback` | | Don't use Zacks (no browser needed) |
+| `--no-fallback` | | Don't use Zacks. The browser is then only started for Schwab; if it can't start, Schwab ETFs are skipped |
 | `--browser` | `chrome` | `chrome` (installed Google Chrome), `chromium` (after `playwright install chromium`), or a path to a browser |
 | `--browser-workers` | 4 | Browsers loading Zacks pages in parallel |
 | `--show-browser` | | Show the browser windows, for troubleshooting |
@@ -187,10 +188,11 @@ should be close to 100), `source_url`, and `detail` (why sources failed).
   no market value; their gains and losses are in the "Net Other Assets" row.
   Weights of a 3x fund such as TQQQ add up to about 300%, and
   `value_weight_pct` is left blank for those funds.
-- **The Direxion parser has not been checked against a live file.** Direxion's
-  site blocked the tool used to capture the samples, so its test sample uses
-  the columns of an older copy of SOXL's file. If the format has changed,
-  Direxion funds fall back to Zacks and the summary's `detail` column says why.
+- **Direxion's test sample is representative.** Direxion's site blocked the
+  tool used to capture the samples, so the sample uses the columns of an older
+  copy of SOXL's file. The live file parses: on 2026-10-21, SOXL returned 44
+  holdings as of 2026-10-20. Its weights include swap exposure, so a 3x fund's
+  add up to about 300% or more.
 - **Sectors are filled in from iShares.** Zacks publishes no sectors and State
   Street leaves them as "-", which left SPY, VOO, VTI and most other common ETFs
   without any. After a run, blank sectors are filled in from how iShares

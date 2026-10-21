@@ -96,6 +96,15 @@ def test_bot_check_that_never_clears(server, pool):
         pool.get(f"{server}/funds/etf/SPY/holding")
 
 
+def test_giving_up_on_one_website_leaves_others_alone(server, pool):
+    pool.GIVE_UP_AFTER = 2
+    for _ in range(2):
+        with pytest.raises(s.Blocked, match="did not clear"):
+            pool.get(f"{server}/funds/etf/STUCK/holding")
+    other_site = server.replace("127.0.0.1", "localhost")
+    assert len(s.parse_zacks(pool.get(f"{other_site}/funds/etf/SPY/holding").decode())) == 4
+
+
 def test_pages_load_in_parallel(server, pool):
     from concurrent.futures import ThreadPoolExecutor
 
